@@ -212,3 +212,11 @@ fun test_plugin_log_opens_a_buffer() {
     assert_true(ed.message.contains("no plugin nobody"))
     ed.shutdown_plugins()
 }
+
+fun test_plugin_command_runs_from_ex() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.ex("fake.hello")
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}

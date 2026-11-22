@@ -1965,6 +1965,10 @@ impl Ed {
                     return
                 }
             }
+            if self.plug.commands.has(head) {
+                self.run(head, 1)
+                return
+            }
             if head.starts_with("plugin.") or self.plugin_named(head).is_some() {
                 self.run(head if head.starts_with("plugin.") else "plugin.${head}", 1)
                 if self.mode == "visual" or self.mode == "vline" {
