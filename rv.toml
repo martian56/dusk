@@ -9,6 +9,10 @@ edition = "v3"
 "github.com/martian56/wingspan" = "v0.2.0"
 "github.com/martian56/raven-toml" = "v0.3.0"
 
+[workspace]
+members = ["tests/fake-plugin"]
+default-member = "dusk"
+
 [dist]
 display_name = "dusk"
 description = "A terminal code editor with modal and everyday key bindings, mouse support, and plugins, written in Raven"
