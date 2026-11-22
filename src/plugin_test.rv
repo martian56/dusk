@@ -7,7 +7,7 @@ from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "./config" import Config, Plugin
 from "./editor" import Ed, new_editor_with, edit_error
-from "./host" import Edit, Contribution, HostAction
+from "./host" import Edit, Contribution, HostAction, Mark
 from "./keys" import parse_script
 from "./view" import render
 
@@ -429,4 +429,71 @@ fun test_ask_waits_for_normal_mode() {
     keys(ed, "<esc>")
     assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
     ed.shutdown_plugins()
+}
+
+fun test_marks_draw_in_gutter_and_message() {
+    let f = with_file("_dusk_marks_test.txt", "first\nsecond\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.marks", 1)
+    assert_true(wait_for(ed, 5000, e => e.mark_at(f, 0).is_some()))
+    ed.say("")
+    let rows = screen(ed, 100, 12)
+    assert_eq_str(rows[1].chars()[22], "E")
+    assert_true(rows[11].contains("error: bad line"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_marks_for_unopened_file_apply_on_open() {
+    let f = with_file("_dusk_marks_later.txt", "x\n")
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let none: list[Mark] = []
+    ed.apply_action(
+        HostAction.Marks("fake", f, [Mark(row: 0, severity: "warning", message: "later", sign: "")]),
+    )
+    ed.open(f)
+    assert_eq_str(ed.mark_at(f, 0).unwrap().message, "later")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_marks_past_end_are_ignored() {
+    let f = with_file("_dusk_marks_far.txt", "only\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.marks", 1)
+    assert_true(wait_for(ed, 5000, e => e.mark_at(f, 0).is_some()))
+    assert_true(ed.mark_at(f, 999).is_none())
+    let _ = screen(ed, 100, 12)
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_plugin_exit_clears_its_ui() {
+    let f = with_file("_dusk_exit_ui.txt", "x\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.panel", 1)
+    ed.run("fake.marks", 1)
+    ed.run("fake.hello", 1)
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => len(e.plug.panels) == 1 and e.mark_at(f, 0).is_some() and e.plug.status.has(
+                "fake/fake",
+            ),
+        ),
+    )
+    keys(ed, "<f6>")
+    ed.run("fake.die", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.hosts[0].state == "exited"))
+    assert_eq_int(len(ed.plug.panels), 0)
+    assert_true(ed.mark_at(f, 0).is_none())
+    assert_false(ed.plug.status.has("fake/fake"))
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
 }

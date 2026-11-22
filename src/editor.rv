@@ -13,7 +13,16 @@ from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
 from std.json import JsonValue
 from "./rpc" import obj, jstr, jint
 from "./ui" import PanelState, new_panel, replace_panel, panel_key, keep_in_view, layout, paste_into
-from "./host" import PluginSpec, PluginProc, HostAction, Contribution, Binding, Edit, start_plugin
+from "./host" import (
+    PluginSpec,
+    PluginProc,
+    HostAction,
+    Contribution,
+    Binding,
+    Edit,
+    Mark,
+    start_plugin,
+)
 
 class Jump {
     path: str
@@ -130,6 +139,18 @@ class Plugins {
     // Waiting picks and prompts; the first is on screen when `asking`.
     asks: list[Ask] = []
     asking: bool = false
+    // Path -> plugin -> its marks for that file.
+    marks: dict[str, dict[str, list[Mark]]] = {}
+}
+
+fun severity_rank(s: str) -> int {
+    if s == "error" {
+        return 4
+    }
+    if s == "warning" {
+        return 3
+    }
+    return 2 if s == "info" else 1
 }
 
 let CHANGES = [
@@ -3421,6 +3442,9 @@ impl Ed {
             for a in h.poll(now_ms) {
                 self.apply_from(Some(h), a)
             }
+            if h.state != "running" {
+                self.clear_plugin_ui(h)
+            }
         }
         self.update_asks()
     }
@@ -3523,6 +3547,13 @@ impl Ed {
                     }
                 }
             }
+            case Marks(p, path, ms) {
+                if not self.plug.marks.has(path) {
+                    let fresh: dict[str, list[Mark]] = {}
+                    self.plug.marks.set(path, fresh)
+                }
+                self.plug.marks.get(path).unwrap().set(p, ms.filter(m => m.row >= 0))
+            }
             case Pick(p, id, title, items) {
                 match from {
                     case Some(h) {
@@ -3598,6 +3629,64 @@ impl Ed {
                 case _ { a.host.respond(a.id, obj([("cancelled", JsonValue.Bool(true))])) }
             }
         }
+    }
+
+    // The most severe mark any plugin set on `row` of `path`, ignoring rows
+    // past the end of an open buffer.
+    fun mark_at(self, path: str, row: int) -> Option[Mark] {
+        let by_plugin = match self.plug.marks.get(path) {
+            case Some(m) { m }
+            case None {
+                return None
+            }
+        }
+        match self.doc_at(path) {
+            case Some(d) {
+                if path != "" and row >= len(d.lines) {
+                    return None
+                }
+            }
+            case None {}
+        }
+        var best: Option[Mark] = None
+        var rank = 0
+        for (p, ms) in by_plugin {
+            for m in ms {
+                if m.row == row and severity_rank(m.severity) > rank {
+                    rank = severity_rank(m.severity)
+                    best = Some(m)
+                }
+            }
+        }
+        return best
+    }
+
+    // A plugin that stopped takes its panels, marks, status items, and any
+    // waiting pick or prompt with it.
+    fun clear_plugin_ui(self, h: PluginProc) {
+        let name = h.spec.name
+        var i = len(self.plug.panels) - 1
+        while i >= 0 {
+            if self.plug.panels[i].owner == name {
+                self.remove_panel(i)
+            }
+            i -= 1
+        }
+        for (path, by_plugin) in self.plug.marks {
+            let _ = by_plugin.remove(name)
+        }
+        for k in self.plug.status.keys() {
+            if k.starts_with("${name}/") {
+                let _ = self.plug.status.remove(k)
+            }
+        }
+        if self.plug.asking and self.plug.asks[0].host.spec.name == name {
+            self.plug.asking = false
+            if self.mode == "picker" or self.mode == "prompt" {
+                self.mode = "normal"
+            }
+        }
+        self.plug.asks = self.plug.asks.filter(a => a.host.spec.name != name)
     }
 
     fun ask_title(self) -> str = self.plug.asks[0].title if self.plug.asking else ""

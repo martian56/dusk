@@ -287,6 +287,13 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
             let label = "${num}"
             let gst = Style.new().fg(t.c("ui.gutter.current") if is_cur else t.c("ui.gutter")).bg(row_bg)
             let _ = put(buf, x0 + gutter - 2 - label.length(), y, label, gst)
+            match ed.mark_at(d.path, r) {
+                case Some(m) {
+                    let sign = m.sign.chars()[0] if m.sign != "" else m.severity.substring(0, 1).to_upper()
+                    buf.set(x0, y, sign, Style.new().fg(t.c(mark_color(m.severity))).bg(row_bg).bold())
+                }
+                case None {}
+            }
         }
         let line = d.lines[r]
         let cs = line.chars()
@@ -525,7 +532,25 @@ fun draw_message(ed: Ed, buf: Buffer, y: int) {
     if ed.message != "" {
         let mst = Style.new().fg(t.c("ui.error")).bg(t.c("ui.bg")).bold() if ed.error else st
         let _ = put(buf, 0, y, truncate(ed.message, buf.w - 1), mst)
+        return
     }
+    if ed.mode == "normal" {
+        let d = ed.doc()
+        match ed.mark_at(d.path, d.row) {
+            case Some(m) {
+                let mst = Style.new().fg(t.c(mark_color(m.severity))).bg(t.c("ui.bg"))
+                let _ = put(buf, 0, y, truncate("${m.severity}: ${m.message}", buf.w - 1), mst)
+            }
+            case None {}
+        }
+    }
+}
+
+fun mark_color(severity: str) -> str {
+    if severity == "error" {
+        return "ui.error"
+    }
+    return "ui.mode.command" if severity == "warning" else "ui.gutter"
 }
 
 fun draw_box(ed: Ed, buf: Buffer, x: int, y: int, w: int, h: int, title: str) {
