@@ -732,3 +732,106 @@ fun test_config_plugin_wins_and_survives_failed_updates() {
     ed.shutdown_plugins()
     let _ = remove_tree(root)
 }
+
+fun test_external_change_reloads_a_clean_buffer() {
+    let f = with_file("_dusk_ext_clean.txt", "one\n")
+    let ed = new_editor_with([f], Config())
+    sleep_millis(30)
+    write(f, "two\n")
+    ed.check_disk()
+    assert_eq_str(ed.doc().lines[0], "two")
+    assert_true(ed.message.contains("reloaded"))
+    let _ = remove_file(f)
+}
+
+fun test_external_change_to_unsaved_edits_asks() {
+    let f = with_file("_dusk_ext_dirty.txt", "one\n")
+    let ed = new_editor_with([f], Config())
+    keys(ed, "Ax<esc>")
+    sleep_millis(30)
+    write(f, "two\n")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "confirm")
+    assert_true(ed.message.contains("r reload"))
+    keys(ed, "k")
+    assert_eq_str(ed.doc().lines[0], "onex")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "normal")
+    sleep_millis(30)
+    write(f, "three\n")
+    ed.check_disk()
+    keys(ed, "r")
+    assert_eq_str(ed.doc().lines[0], "three")
+    assert_false(ed.doc().dirty)
+    let _ = remove_file(f)
+}
+
+fun test_disk_question_waits_for_normal_mode() {
+    let f = with_file("_dusk_ext_wait.txt", "one\n")
+    let ed = new_editor_with([f], Config())
+    keys(ed, "Ax")
+    sleep_millis(30)
+    write(f, "two\n")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "insert")
+    keys(ed, "<esc>")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "confirm")
+    keys(ed, "k")
+    let _ = remove_file(f)
+}
+
+fun test_duplicate_pick_labels_answer_by_position() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let h = ed.plug.hosts[0]
+    ed.apply_from(Some(h), HostAction.Pick("fake", 77, "Twice", [("same", ""), ("same", "")]))
+    ed.update_asks()
+    assert_eq_str(ed.mode, "picker")
+    keys(ed, "<down>")
+    assert_eq_int(ed.picker_index(), 1)
+    ed.shutdown_plugins()
+}
+
+fun test_close_panel_needs_a_focused_panel() {
+    let ed = with_panel()
+    ed.run("close_panel", 1)
+    assert_eq_int(len(ed.plug.panels), 1)
+    assert_true(ed.message.contains("F6"))
+    keys(ed, "<f6>")
+    ed.run("close_panel", 1)
+    assert_eq_int(len(ed.plug.panels), 0)
+    ed.shutdown_plugins()
+}
+
+fun test_save_as_tells_plugins_about_both_names() {
+    let a = with_file("_dusk_saveas_a.txt", "a\n")
+    let ed = editor("record", [a])
+    assert_true(ready(ed))
+    ed.ex("w _dusk_saveas_b.txt")
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => e.plug.status.get("fake/seen").unwrap_or("").split("buffer/opened").len() == 3,
+        ),
+    )
+    assert_true(ed.plug.status.get("fake/seen").unwrap_or("").contains("buffer/closed"))
+    ed.shutdown_plugins()
+    let _ = remove_file(a)
+    let _ = remove_file("_dusk_saveas_b.txt")
+}
+
+fun test_long_status_items_are_cut() {
+    let ed = new_editor_with([], Config())
+    ed.apply_action(
+        HostAction.Status(
+            "fake",
+            "x",
+            "a very long status item that would push the position off screen",
+        ),
+    )
+    let line = status_line(ed)
+    assert_true(line.contains("Ln 1"))
+    assert_true(line.contains("…"))
+}

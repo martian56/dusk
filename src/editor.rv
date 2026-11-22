@@ -1,7 +1,8 @@
 // The editor: state, commands, and input handling. Rendering is in view.rv.
 
-from std.fs import exists, is_dir, write, create_dir_all, read
+from std.fs import exists, is_dir, write, create_dir_all, read, modified
 from std.time import now_millis
+from std.env import current_dir
 from std.process import run_with_input
 from "github.com/martian56/perch/keys" import Key, MouseEvent
 from "./doc" import Doc, open_doc, clen, csub
@@ -189,6 +190,11 @@ class Plugins {
     // Where :plugin install puts plugins; "" means ~/.config/dusk/plugins.
     install_root: str = ""
     jobs: list[Job] = []
+    // Open files whose disk copy changed under unsaved edits, waiting to ask
+    // what to do, and the one being asked about.
+    disk_asks: list[(str, str)] = []
+    asking_disk: str = ""
+    disk_checked: int = 0
 }
 
 fun severity_rank(s: str) -> int {
@@ -1316,7 +1322,7 @@ impl Ed {
                 self.go(r, max(0, col))
             }
         } else if kind == "plugin" {
-            self.answer_ask(JsonValue.Str(item))
+            self.answer_ask(jint(self.picker_index()))
         } else if kind == "themes" {
             self.set_theme(item)
         } else if kind == "languages" {
@@ -1965,6 +1971,7 @@ impl Ed {
         let arg = cmd.substring(sp + 1, cmd.length()).trim() if sp >= 0 else ""
         if head == "w" or head == "write" {
             if arg != "" {
+                self.renamed(d, arg.replace("\\", "/"))
                 d.path = arg.replace("\\", "/")
                 d.lang = lang_for_path(self.langs, d.path)
                 d.touched(0)
@@ -2199,6 +2206,11 @@ impl Ed {
         }
         if mode == "confirm" {
             self.mode = "normal"
+            if self.confirm == "disk" {
+                self.confirm = ""
+                self.answer_disk(name)
+                return
+            }
             if name == "s" or name == "y" {
                 if self.confirm == "quit" {
                     self.run("save_all", 1)
@@ -3279,7 +3291,8 @@ impl Ed {
             args: p.args,
             activation: p.activation,
         )
-        let h = start_plugin(spec, ".")
+        let root = current_dir()
+        let h = start_plugin(spec, root if root != "" else ".")
         self.plug.hosts.push(h)
         for d in self.docs {
             if d.path != "" {
@@ -3508,14 +3521,24 @@ impl Ed {
             }
         }
         self.update_asks()
+        if now_ms - self.plug.disk_checked >= 1500 {
+            self.plug.disk_checked = now_ms
+            self.check_disk()
+        }
         if len(self.plug.jobs) > 0 {
             self.finish_jobs()
         }
     }
 
+    // Ask every plugin to exit at once, then give them half a second in
+    // total, so quitting is quick however many plugins run.
     fun shutdown_plugins(self) {
         for h in self.plug.hosts {
-            h.shutdown()
+            h.request_shutdown()
+        }
+        let end = now_millis() + 500
+        for h in self.plug.hosts {
+            h.finish_shutdown(end)
         }
     }
 
@@ -3648,6 +3671,23 @@ impl Ed {
         }
     }
 
+    // The chosen row's position in the plugin's own list.
+    fun picker_index(self) -> int {
+        if len(self.picker_shown) == 0 {
+            return 0 - 1
+        }
+        if self.prompt == "" {
+            return self.picker_sel
+        }
+        let item = self.picker_shown[self.picker_sel]
+        for i in range(len(self.picker_items)) {
+            if self.picker_items[i] == item {
+                return i
+            }
+        }
+        return 0 - 1
+    }
+
     fun ask_label(self, item: (str, str)) -> str {
         let (label, detail) = item
         return label if detail == "" else "${label}  ${detail}"
@@ -3685,6 +3725,12 @@ impl Ed {
         if a.kind == "pick" {
             var index = 0 - 1
             match value {
+                case Number(n) {
+                    index = value.as_int().unwrap_or(0 - 1)
+                    if index >= len(a.items) {
+                        index = 0 - 1
+                    }
+                }
                 case Str(label) {
                     for i in range(len(a.items)) {
                         if index < 0 and self.ask_label(a.items[i]) == label {
@@ -3738,7 +3784,13 @@ impl Ed {
     // unsaved edits (one undo step brings the old text back), and warn about
     // one that does.
     fun file_changed(self, plugin: str, path: str) {
-        let p = path.replace("\\", "/")
+        self.disk_changed(path.replace("\\", "/"), plugin)
+    }
+
+    // `path` may have changed on disk, by `who`: reload a buffer without
+    // unsaved edits (one undo brings the old text back); for one with edits,
+    // ask once dusk is back in normal mode.
+    fun disk_changed(self, p: str, who: str) {
         if p == "" {
             return
         }
@@ -3752,30 +3804,100 @@ impl Ed {
                     return
                 }
             }
+            d.mtime = modified(p)
             if disk == d.disk {
                 return
             }
             if d.dirty {
-                d.disk = disk
-                self.fail("${p} changed on disk (by ${plugin}); :e reloads it and drops your edits")
+                if not self.plug.disk_asks.any(x => x.0 == p) and self.plug.asking_disk != p {
+                    self.plug.disk_asks.push((p, who))
+                }
+                self.ask_disk()
                 return
             }
-            let fresh = open_doc(p, d.lang)
-            if fresh.lines.len() == d.lines.len() and "\n".join(fresh.lines) == "\n".join(d.lines) {
-                d.disk = disk
-                d.crlf = fresh.crlf
-                return
-            }
-            d.checkpoint()
-            d.lines = fresh.lines
-            d.crlf = fresh.crlf
-            d.disk = disk
-            d.clamp()
-            d.touched(0)
-            d.dirty = false
-            self.say("reloaded ${p}, changed by ${plugin}")
+            self.reload_from_disk(d, disk, who)
             return
         }
+    }
+
+    fun reload_from_disk(self, d: Doc, disk: str, who: str) {
+        let fresh = open_doc(d.path, d.lang)
+        d.disk = disk
+        d.crlf = fresh.crlf
+        d.mtime = fresh.mtime
+        if "\n".join(fresh.lines) == "\n".join(d.lines) {
+            return
+        }
+        d.checkpoint()
+        d.lines = fresh.lines
+        d.clamp()
+        d.touched(0)
+        d.dirty = false
+        self.say("reloaded ${d.path}, changed by ${who}")
+    }
+
+    fun ask_disk(self) {
+        if self.plug.asking_disk != "" or len(self.plug.disk_asks) == 0 or self.mode != "normal" {
+            return
+        }
+        let (p, who) = self.plug.disk_asks.remove_at(0)
+        self.plug.asking_disk = p
+        self.confirm = "disk"
+        self.mode = "confirm"
+        self.fail(
+            "${p} changed on disk (by ${who}) and has unsaved edits: r reload it, k keep yours",
+        )
+    }
+
+    fun answer_disk(self, name: str) {
+        let p = self.plug.asking_disk
+        self.plug.asking_disk = ""
+        for d in self.docs {
+            if d.path == p {
+                let disk = match read(p) {
+                    case Ok(t) { t }
+                    case Err(e) { "" }
+                }
+                if name == "r" {
+                    d.dirty = false
+                    self.reload_from_disk(d, disk, "you")
+                    self.say("reloaded ${p}")
+                } else {
+                    // Keep the edits; the next save writes them over the file.
+                    d.disk = disk
+                    self.say("kept your edits to ${p}")
+                }
+            }
+        }
+        self.ask_disk()
+    }
+
+    // Notice files changed by other programs (an editor, git, rook in a
+    // terminal) by their modification time.
+    fun check_disk(self) {
+        for d in self.docs {
+            if d.path != "" and d.mtime >= 0 {
+                let m = modified(d.path)
+                if m >= 0 and m != d.mtime {
+                    self.disk_changed(d.path, "another program")
+                }
+            }
+        }
+        self.ask_disk()
+    }
+
+    // A buffer is about to take a new name: plugins see the old one close and
+    // the new one open.
+    fun renamed(self, d: Doc, to: str) {
+        if to == d.path {
+            return
+        }
+        if d.path != "" {
+            self.notify_plugins("buffer/closed", obj([("path", jstr(d.path))]))
+            let _ = self.plug.versions.remove(d.path)
+        }
+        self.notify_plugins("buffer/opened", obj([("path", jstr(to))]))
+        self.plug.versions.set(to, d.version)
     }
 
     fun plugins_dir(self) -> str = self.plug.install_root if self.plug.install_root != "" else config_dir() + "/plugins"
@@ -3993,12 +4115,15 @@ impl Ed {
     }
 
     fun close_focused_panel(self) {
-        let n = len(self.plug.panels)
-        if n == 0 {
+        if len(self.plug.panels) == 0 {
             self.fail("no plugin panels")
             return
         }
-        self.close_panel_at(self.plug.focus if self.plug.focus >= 0 else n - 1)
+        if self.plug.focus < 0 {
+            self.fail("focus a panel first (F6), then close it")
+            return
+        }
+        self.close_panel_at(self.plug.focus)
     }
 
     fun focus_panel(self, i: int) {
@@ -4101,6 +4226,15 @@ impl Ed {
                 case _ {}
             }
             return false
+        }
+        match m.kind {
+            case Up {
+                return false
+            }
+            case Drag {
+                return false
+            }
+            case _ {}
         }
         let p = self.plug.panels[i]
         let (rx, ry, rw, rh) = self.plug.rects[i]

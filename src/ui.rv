@@ -93,7 +93,7 @@ fun replace_panel(old: PanelState, spec: PanelSpec) -> PanelState {
         let b = spec.blocks[i]
         match old.sel.get(b.id) {
             case Some(s) {
-                if s < len(b.items) {
+                if s >= 0 and s < len(b.items) {
                     p.sel.set(b.id, s)
                 }
             }
@@ -400,6 +400,9 @@ fun panel_key(p: PanelState, name: str, text: str) -> PanelEvent {
     }
     if b.kind == "buttons" {
         let n = len(b.items)
+        if n == 0 {
+            return no_event()
+        }
         let sel = p.sel.get(b.id).unwrap_or(0)
         if name == "right" {
             p.sel.set(b.id, min(n - 1, sel + 1))

@@ -74,6 +74,13 @@ keyword = "#ff79c6"
 
 Any command from the palette (`Ctrl+K`) can be bound in any mode.
 
+## Files changed elsewhere
+
+dusk notices when another program (git, a formatter, rook in a terminal)
+changes an open file. A buffer without unsaved edits reloads, and one undo
+brings back what you had; for a buffer with unsaved edits dusk asks whether
+to reload it (`r`) or keep yours (`k`).
+
 ## Plugins
 
 A plugin is a program dusk runs as a command named `plugin.<name>`. It can

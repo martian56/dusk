@@ -1,6 +1,7 @@
 // Drawing one frame of the editor. Also records the layout on the editor so
 // mouse positions can be mapped back to buffers, files, and tabs.
 
+from std.time import now_millis
 from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "github.com/martian56/plumage/style" import Style
@@ -449,7 +450,7 @@ fun draw_plugin_panel(ed: Ed, buf: Buffer, i: int, x: int, y: int, w: int, h: in
         buf.set(x, yy, "│", border)
     }
     let cw = w - 2
-    let rows = layout(p, cw, h - 1, ed.plug.frame)
+    let rows = layout(p, cw, h - 1, now_millis() / 100)
     for r in range(len(rows)) {
         let row = rows[r]
         let ry = y + 1 + r
@@ -506,7 +507,9 @@ fun draw_status(ed: Ed, buf: Buffer, y: int) {
     let pct = 100 * (d.row + 1) / len(d.lines)
     var items = ""
     for k in ed.plug.status.keys().sorted() {
-        items += "${ed.plug.status.get(k).unwrap()}  "
+        let cs = ed.plug.status.get(k).unwrap().chars()
+        let item = "".join(cs.slice(0, 23)) + "…" if len(cs) > 24 else "".join(cs)
+        items += "${item}  "
     }
     let right = "${items}${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
     let _ = put(buf, max(x + 1, buf.w - right.length()), y, right, bar)

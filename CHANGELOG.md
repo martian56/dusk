@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 - 2026-11-22
+
+- Files changed by other programs (another editor, git, rook in a terminal) reload by themselves. When the buffer has unsaved edits, dusk asks: `r` reloads it, `k` keeps your edits.
+- Plugins get the real project directory as `root`, start their builds in the plugin's directory, and quit together, so leaving dusk with several plugins is quick.
+- Picks answer by position, so two rows with the same label stay distinct; long status items are cut; save-as tells plugins the old name closed and the new one opened; a plugin restarted after a long run gets its three restarts back; `"error": null` counts as success and a request with a non-numeric id is reported.
+- `close_panel` closes the focused panel only.
+- Built on Raven 3.4.0.
+
 ## 0.3.0 - 2026-11-22
 
 - Plugin UI that dusk draws: panels docked right or at the bottom, made of markdown, lists, text inputs, buttons, and progress; pickers and prompts; and marks in the gutter such as diagnostics. F6 and Shift+F6 move focus between the editor and panels, and the mouse works in them.
