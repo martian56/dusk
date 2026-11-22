@@ -1,0 +1,146 @@
+// Project files: the sidebar tree, the fuzzy finder's file list, and scoring.
+
+from std.fs import list_dir, is_dir
+
+let IGNORED = [
+    ".git",
+    "target",
+    "node_modules",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".venv",
+    "dist",
+    "build",
+    ".idea",
+    ".vscode",
+    ".rvpm",
+]
+
+fun join_path(dir: str, name: str) -> str {
+    if dir == "" or dir == "." {
+        return name
+    }
+    return dir + "/" + name
+}
+
+class TreeItem {
+    path: str
+    name: str
+    depth: int
+    dir: bool
+    open: bool
+}
+
+// Directories first, then files, each alphabetical (case-insensitive).
+fun sorted_entries(dir: str) -> list[(str, bool)] {
+    let dirs: list[str] = []
+    let files: list[str] = []
+    match list_dir(dir if dir != "" else ".") {
+        case Ok(names) {
+            for n in names {
+                if n in IGNORED {
+                    continue
+                }
+                dirs.push(n) if is_dir(join_path(dir, n)) else files.push(n)
+            }
+        }
+        case Err(_) {}
+    }
+    let by = (a: str, b: str) => a.to_lower().compare(b.to_lower())
+    let out: list[(str, bool)] = []
+    for d in dirs.sorted_by(by) {
+        out.push((d, true))
+    }
+    for f in files.sorted_by(by) {
+        out.push((f, false))
+    }
+    return out
+}
+
+fun build_tree(root: str, open: dict[str, bool]) -> list[TreeItem] {
+    let out: list[TreeItem] = []
+    add_dir(out, root, 0, open)
+    return out
+}
+
+fun add_dir(out: list[TreeItem], dir: str, depth: int, open: dict[str, bool]) {
+    for (name, d) in sorted_entries(dir) {
+        let path = join_path(dir, name)
+        let is_open = d and open.get(path).unwrap_or(false)
+        out.push(TreeItem(path: path, name: name, depth: depth, dir: d, open: is_open))
+        if is_open {
+            add_dir(out, path, depth + 1, open)
+        }
+    }
+}
+
+// Every file below `root`, skipping ignored directories, up to `limit`.
+fun all_files(root: str, limit: int) -> list[str] {
+    let out: list[str] = []
+    let stack: list[str] = [root]
+    while len(stack) > 0 and len(out) < limit {
+        let dir = stack.pop()
+        for (name, d) in sorted_entries(dir) {
+            let path = join_path(dir, name)
+            stack.push(path) if d else out.push(path)
+        }
+    }
+    return out
+}
+
+// Fuzzy score of `query` against `text`: -1 when the letters are not all
+// there in order. Consecutive letters, word starts, and letters in the file
+// name (after the last slash) score higher; shorter paths win ties.
+fun fuzzy_score(query: str, text: str) -> int {
+    if query == "" {
+        return 1000 - text.length()
+    }
+    let q = query.to_lower().chars()
+    let t = text.to_lower().chars()
+    let base = max(text.last_index_of("/"), text.last_index_of("\\")) + 1
+    var score = 0
+    var qi = 0
+    var prev = -2
+    var ti = 0
+    while ti < len(t) and qi < len(q) {
+        if t[ti] == q[qi] {
+            score += 10
+            if ti == prev + 1 {
+                score += 15
+            }
+            if ti == 0 or "/\\_-. ".contains(t[ti - 1]) {
+                score += 20
+            }
+            if ti >= base {
+                score += 10
+            }
+            prev = ti
+            qi += 1
+        }
+        ti += 1
+    }
+    if qi < len(q) {
+        return -1
+    }
+    return score * 4 - len(t)
+}
+
+fun fuzzy_filter(query: str, items: list[str], limit: int) -> list[str] {
+    let scored: list[(int, str)] = []
+    for it in items {
+        let s = fuzzy_score(query, it)
+        if s >= 0 {
+            scored.push((s, it))
+        }
+    }
+    let best = scored.sorted_by((a, b) => b.0 - a.0)
+    let out: list[str] = []
+    for (s, it) in best {
+        if len(out) >= limit {
+            break
+        }
+        out.push(it)
+    }
+    return out
+}

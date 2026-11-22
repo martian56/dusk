@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Raven
+        uses: martian56/setup-raven@v1
+        with:
+          raven-version: "3.3.0"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # dpkg-deb ships on the runner; rpm brings rpmbuild.
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          rvpm dist --target tar,deb,rpm
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # WiX 3 (candle.exe, light.exe) builds the MSI.
+          choco install wixtoolset --version 3.14.0 --yes --no-progress
+          $env:PATH = "C:\Program Files (x86)\WiX Toolset v3.14\bin;$env:PATH"
+          rvpm dist --target zip,msi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            target/dist/*.tar.gz
+            target/dist/*.zip
+            target/dist/*.deb
+            target/dist/*.rpm
+            target/dist/*.msi
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "dusk $GITHUB_REF_NAME" \
+            --generate-notes \
+            artifacts/*/*

@@ -1,0 +1,229 @@
+// An open file: its lines, cursor, scroll, undo history, and highlight cache.
+// Positions are (row, col) with col counted in characters, not bytes.
+
+from std.fs import read, write, exists
+
+class Snap {
+    lines: list[str]
+    row: int
+    col: int
+}
+
+class Doc {
+    path: str
+    lines: list[str]
+    lang: int
+    row: int = 0
+    col: int = 0
+    // The column vertical moves try to return to.
+    want: int = 0
+    top: int = 0
+    left: int = 0
+    dirty: bool = false
+    crlf: bool = false
+    undo: list[Snap] = []
+    redo: list[Snap] = []
+    // Highlight state at the start of each line, valid below `hl_valid`.
+    hl: list[int] = []
+    hl_valid: int = 0
+}
+
+fun clen(s: str) -> int = len(s.chars())
+
+// Characters [a, b) of `s`.
+fun csub(s: str, a: int, b: int) -> str {
+    let cs = s.chars()
+    var out = ""
+    for i in range(max(0, a), min(b, len(cs))) {
+        out += cs[i]
+    }
+    return out
+}
+
+fun split_lines(text: str) -> list[str] {
+    let out: list[str] = []
+    var i = 0
+    let n = text.length()
+    var start = 0
+    while i < n {
+        if text.char_at(i) == "\n" {
+            out.push(text.substring(start, i))
+            start = i + 1
+        }
+        i += 1
+    }
+    out.push(text.substring(start, n))
+    return out
+}
+
+fun open_doc(path: str, lang: int) -> Doc {
+    var lines: list[str] = [""]
+    var crlf = false
+    if path != "" and exists(path) {
+        match read(path) {
+            case Ok(text) {
+                crlf = text.contains("\r\n")
+                lines = split_lines(text.replace("\r\n", "\n"))
+                // A trailing newline is not an extra empty line.
+                if len(lines) > 1 and lines[len(lines) - 1] == "" {
+                    let _ = lines.pop()
+                }
+            }
+            case Err(_) {}
+        }
+    }
+    return Doc(path: path, lines: lines, lang: lang, crlf: crlf)
+}
+
+impl Doc {
+    fun text(self) -> str {
+        return "\n".join(self.lines) + "\n"
+    }
+
+    fun save(self) -> Result[bool, str] {
+        if self.path == "" {
+            return Err("no file name (use :w name)")
+        }
+        var body = self.text()
+        if self.crlf {
+            body = body.replace("\n", "\r\n")
+        }
+        return match write(self.path, body) {
+            case Ok(_) {
+                self.dirty = false
+                Ok(true)
+            }
+            case Err(e) { Err(e.message()) }
+        }
+    }
+
+    fun line_len(self, r: int) -> int = clen(self.lines[r])
+
+    fun clamp(self) {
+        self.row = max(0, min(self.row, len(self.lines) - 1))
+        self.col = max(0, min(self.col, self.line_len(self.row)))
+    }
+
+    // Record the state before a change so it can be undone as one step.
+    fun checkpoint(self) {
+        self.undo.push(Snap(self.lines.copy(), self.row, self.col))
+        if len(self.undo) > 500 {
+            let _ = self.undo.remove_at(0)
+        }
+        self.redo.clear()
+    }
+
+    fun touched(self, from_row: int) {
+        self.dirty = true
+        self.hl_valid = min(self.hl_valid, max(0, from_row))
+    }
+
+    fun do_undo(self) -> bool {
+        if len(self.undo) == 0 {
+            return false
+        }
+        self.redo.push(Snap(self.lines.copy(), self.row, self.col))
+        let s = self.undo.pop()
+        self.lines = s.lines
+        self.row = s.row
+        self.col = s.col
+        self.clamp()
+        self.touched(0)
+        return true
+    }
+
+    fun do_redo(self) -> bool {
+        if len(self.redo) == 0 {
+            return false
+        }
+        self.undo.push(Snap(self.lines.copy(), self.row, self.col))
+        let s = self.redo.pop()
+        self.lines = s.lines
+        self.row = s.row
+        self.col = s.col
+        self.clamp()
+        self.touched(0)
+        return true
+    }
+
+    // Insert `text` (which may hold newlines) at (r, c); returns the
+    // position just after it.
+    fun insert_at(self, r: int, c: int, text: str) -> (int, int) {
+        let line = self.lines[r]
+        let before = csub(line, 0, c)
+        let after = csub(line, c, clen(line))
+        let parts = split_lines(text)
+        if len(parts) == 1 {
+            self.lines[r] = before + text + after
+            self.touched(r)
+            return (r, c + clen(text))
+        }
+        self.lines[r] = before + parts[0]
+        var at = r
+        for k in range(1, len(parts) - 1) {
+            at += 1
+            self.lines.insert(at, parts[k])
+        }
+        let last = parts[len(parts) - 1]
+        at += 1
+        self.lines.insert(at, last + after)
+        self.touched(r)
+        return (at, clen(last))
+    }
+
+    fun text_range(self, r1: int, c1: int, r2: int, c2: int) -> str {
+        if r1 == r2 {
+            return csub(self.lines[r1], c1, c2)
+        }
+        var out = csub(self.lines[r1], c1, self.line_len(r1)) + "\n"
+        for r in range(r1 + 1, r2) {
+            out += self.lines[r] + "\n"
+        }
+        return out + csub(self.lines[r2], 0, c2)
+    }
+
+    fun delete_range(self, r1: int, c1: int, r2: int, c2: int) -> str {
+        let gone = self.text_range(r1, c1, r2, c2)
+        let head = csub(self.lines[r1], 0, c1)
+        let tail = csub(self.lines[r2], c2, self.line_len(r2))
+        var k = r2
+        while k > r1 {
+            let _ = self.lines.remove_at(k)
+            k -= 1
+        }
+        self.lines[r1] = head + tail
+        self.touched(r1)
+        return gone
+    }
+
+    // Whole lines [r1, r2], removed; the buffer always keeps one line.
+    fun delete_lines(self, r1: int, r2: int) -> str {
+        var out = ""
+        for r in range(r1, r2 + 1) {
+            out += self.lines[r] + "\n"
+        }
+        var k = r2
+        while k >= r1 {
+            let _ = self.lines.remove_at(k)
+            k -= 1
+        }
+        if len(self.lines) == 0 {
+            self.lines.push("")
+        }
+        self.touched(r1)
+        return out
+    }
+
+    fun indent_of(self, r: int) -> str {
+        let cs = self.lines[r].chars()
+        var out = ""
+        for ch in cs {
+            if ch == " " or ch == "\t" {
+                out += ch
+            } else {
+                return out
+            }
+        }
+        return out
+    }
+}

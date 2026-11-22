@@ -1,0 +1,225 @@
+// User configuration: ~/.config/dusk/config.toml, then ./.dusk.toml on top.
+
+from std.env import get_env
+from std.fs import read, exists
+from "github.com/martian56/raven-toml" import parse, Toml
+from "./langs" import Lang, lang, BUILTIN
+
+// An external command exposed as an editor command named `plugin.<name>`.
+class Plugin {
+    name: str
+    command: str
+    args: list[str]
+    // What the command reads on stdin: "buffer", "selection", "line", or "none".
+    input: str
+    // What happens with its stdout: "replace" (the input), "insert" (at the
+    // cursor), "message", "panel", "reload" (re-read the file), or "none".
+    output: str
+    key: str
+    // Run automatically: "save" (after writing) or "open".
+    on: str
+    description: str
+}
+
+class Config {
+    theme: str = "dusk"
+    tab_width: int = 4
+    expand_tabs: bool = true
+    // "absolute", "relative", or "off".
+    numbers: str = "absolute"
+    sidebar: bool = true
+    auto_pairs: bool = true
+    mouse: bool = true
+    clipboard: str = ""
+    scroll_off: int = 3
+    colors: list[(str, str)] = []
+    // mode -> key sequence -> command
+    keys: dict[str, dict[str, str]] = {}
+    langs: list[Lang] = []
+    plugins: list[Plugin] = []
+    errors: list[str] = []
+    files: list[str] = []
+}
+
+fun config_dir() -> str {
+    let xdg = get_env("XDG_CONFIG_HOME")
+    if xdg != "" {
+        return xdg + "/dusk"
+    }
+    var home = get_env("HOME")
+    if home == "" {
+        home = get_env("USERPROFILE")
+    }
+    return home.replace("\\", "/") + "/.config/dusk"
+}
+
+fun config_path() -> str = config_dir() + "/config.toml"
+
+fun default_clipboard() -> str {
+    if get_env("OS") == "Windows_NT" {
+        return "clip"
+    }
+    if get_env("WAYLAND_DISPLAY") != "" {
+        return "wl-copy"
+    }
+    return ""
+}
+
+fun load_config() -> Config {
+    let cfg = Config(clipboard: default_clipboard())
+    for path in [config_path(), ".dusk.toml"] {
+        if exists(path) {
+            match read(path) {
+                case Ok(text) {
+                    match parse(text) {
+                        case Ok(t) {
+                            apply(cfg, t)
+                            cfg.files.push(path)
+                        }
+                        case Err(e) { cfg.errors.push("${path}: ${e.to_string()}") }
+                    }
+                }
+                case Err(e) { cfg.errors.push("${path}: ${e.message()}") }
+            }
+        }
+    }
+    return cfg
+}
+
+fun apply(cfg: Config, t: Toml) {
+    cfg.theme = t.get_string_or("editor.theme", cfg.theme)
+    cfg.tab_width = max(1, t.get_int_or("editor.tab_width", cfg.tab_width))
+    cfg.expand_tabs = t.get_bool_or("editor.expand_tabs", cfg.expand_tabs)
+    cfg.numbers = t.get_string_or("editor.line_numbers", cfg.numbers)
+    cfg.sidebar = t.get_bool_or("editor.sidebar", cfg.sidebar)
+    cfg.auto_pairs = t.get_bool_or("editor.auto_pairs", cfg.auto_pairs)
+    cfg.mouse = t.get_bool_or("editor.mouse", cfg.mouse)
+    cfg.clipboard = t.get_string_or("editor.clipboard", cfg.clipboard)
+    cfg.scroll_off = t.get_int_or("editor.scroll_off", cfg.scroll_off)
+    for k in t.keys("theme") {
+        cfg.colors.push((k, t.get_string_or("theme.${k}", "")))
+    }
+    for mode in ["global", "normal", "insert", "visual"] {
+        let table = "keys.${mode}"
+        for k in t.keys(table) {
+            if not cfg.keys.has(mode) {
+                let fresh: dict[str, str] = {}
+                cfg.keys.set(mode, fresh)
+            }
+            cfg.keys.get(mode).unwrap().set(k, t.get_string_or("${table}.${k}", ""))
+        }
+    }
+    for l in t.tables("language") {
+        let name = l.get_string_or("name", "")
+        if name == "" {
+            cfg.errors.push("a [[language]] needs a name")
+            continue
+        }
+        let block = l.get_strings("block_comment")
+        let nl = lang(
+            name,
+            l.get_strings("extensions"),
+            l.get_string_or("line_comment", ""),
+            block,
+            l.get_strings("keywords"),
+            l.get_strings("types"),
+            l.get_strings("constants"),
+        )
+        for b in l.get_strings("builtins") {
+            nl.words.set(b, BUILTIN)
+        }
+        nl.files = l.get_strings("files")
+        let quotes = l.get_strings("strings")
+        if len(quotes) > 0 {
+            nl.quotes = quotes
+        }
+        nl.multi = l.get_strings("multiline_strings")
+        nl.cap_types = l.get_bool_or("capitalized_types", false)
+        nl.directive = l.get_string_or("directive", "")
+        nl.key_sep = l.get_string_or("key_separator", "")
+        nl.ident_extra = l.get_string_or("identifier_chars", "")
+        nl.nocase = l.get_bool_or("case_insensitive", false)
+        cfg.langs.push(nl)
+    }
+    for p in t.tables("plugin") {
+        let name = p.get_string_or("name", "")
+        let command = p.get_string_or("command", "")
+        if name == "" or command == "" {
+            cfg.errors.push("a [[plugin]] needs a name and a command")
+            continue
+        }
+        cfg.plugins.push(
+            Plugin(
+                name: name,
+                command: command,
+                args: p.get_strings("args"),
+                input: p.get_string_or("input", "none"),
+                output: p.get_string_or("output", "message"),
+                key: p.get_string_or("key", ""),
+                on: p.get_string_or("on", ""),
+                description: p.get_string_or("description", ""),
+            ),
+        )
+    }
+}
+
+let SAMPLE_CONFIG = """# dusk configuration. Lines starting with # are comments.
+# This file lives at ~/.config/dusk/config.toml; a .dusk.toml in a project
+# directory is read after it and wins.
+
+[editor]
+theme = "dusk"            # dusk, dawn, gruvbox, nord
+tab_width = 4
+expand_tabs = true
+line_numbers = "absolute" # absolute, relative, off
+sidebar = true
+auto_pairs = true
+mouse = true
+scroll_off = 3
+# clipboard = "clip"      # a command that receives yanked text on stdin
+
+# Override any color by name (see :help colors).
+[theme]
+# keyword = "#c678dd"
+# "ui.bg" = "#101418"
+
+# Key bindings per mode: "keys" = "command". Run :commands for the list.
+[keys.global]
+# "ctrl+t" = "toggle_sidebar"
+
+[keys.normal]
+# "space w" = "save"
+# "space q" = "quit"
+
+[keys.insert]
+# "j k" = "normal_mode"
+
+# Plugins are commands that run a program. Placeholders: {file} {dir}
+# {line} {col} {word} {lang}. input: buffer, selection, line, none.
+# output: replace, insert, message, panel, reload, none.
+# [[plugin]]
+# name = "format"
+# description = "format with raven fmt"
+# command = "raven"
+# args = ["fmt", "--write", "{file}"]
+# input = "none"
+# output = "reload"
+# on = "save"
+# key = "ctrl+k"
+
+# [[plugin]]
+# name = "sort"
+# command = "sort"
+# input = "selection"
+# output = "replace"
+
+# Teach dusk a new language.
+# [[language]]
+# name = "nim"
+# extensions = ["nim"]
+# line_comment = "#"
+# block_comment = ["#[", "]#"]
+# keywords = ["proc", "let", "var", "if", "else", "for", "while", "return"]
+# types = ["int", "string", "bool"]
+# constants = ["true", "false", "nil"]
+"""

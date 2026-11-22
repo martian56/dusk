@@ -1,0 +1,427 @@
+// Key names, default bindings, and the key-script notation used by --keys.
+
+from "github.com/martian56/perch/keys" import Key, MouseEvent, MouseKind
+
+fun key_name(k: Key) -> str {
+    return match k {
+        case Char(c) { "space" if c == " " else c }
+        case Enter { "enter" }
+        case Tab { "tab" }
+        case Backspace { "backspace" }
+        case Esc { "esc" }
+        case Up { "up" }
+        case Down { "down" }
+        case Left { "left" }
+        case Right { "right" }
+        case Home { "home" }
+        case End { "end" }
+        case PageUp { "pageup" }
+        case PageDown { "pagedown" }
+        case Insert { "insert" }
+        case Delete { "delete" }
+        case F(n) { "f${n}" }
+        case Ctrl(c) { "ctrl+${c}" }
+        case Mod(m) { m }
+    }
+}
+
+let NAMED = [
+    "space",
+    "enter",
+    "tab",
+    "backspace",
+    "esc",
+    "up",
+    "down",
+    "left",
+    "right",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "insert",
+    "delete",
+]
+
+// "gg" means "g g"; "ctrl+s", "space w", and "f5" stay as written.
+fun normalize_binding(seq: str) -> str {
+    let s = seq.trim()
+    if s.contains(" ") or s.contains("+") or s in NAMED or s.length() <= 1 {
+        return s
+    }
+    if s.starts_with("f") and s.substring(1, s.length()).parse_int().is_some() {
+        return s
+    }
+    return " ".join(s.chars())
+}
+
+fun bind(m: dict[str, str], pairs: list[(str, str)]) {
+    for (k, v) in pairs {
+        m.set(k, v)
+    }
+}
+
+fun default_keys() -> dict[str, dict[str, str]] {
+    let global: dict[str, str] = {}
+    bind(
+        global,
+        [
+            ("ctrl+s", "save"),
+            ("ctrl+q", "quit"),
+            ("ctrl+z", "undo"),
+            ("ctrl+y", "redo"),
+            ("ctrl+p", "find_file"),
+            ("ctrl+b", "toggle_sidebar"),
+            ("ctrl+e", "focus_sidebar"),
+            ("ctrl+f", "search_forward"),
+            ("ctrl+g", "goto_line"),
+            ("ctrl+w", "close_buffer"),
+            ("ctrl+n", "new_buffer"),
+            ("ctrl+a", "select_all"),
+            ("ctrl+c", "copy"),
+            ("ctrl+x", "cut"),
+            ("ctrl+v", "paste_before"),
+            ("ctrl+k", "command_palette"),
+            ("ctrl+o", "jump_back"),
+            ("ctrl+t", "next_theme"),
+            ("ctrl+l", "toggle_panel"),
+            ("f1", "help"),
+            ("f2", "rename_symbol_prompt"),
+            ("f3", "search_next"),
+            ("f5", "reload"),
+            ("f10", "quit"),
+            ("f12", "open_config"),
+            ("shift+left", "select_left"),
+            ("shift+right", "select_right"),
+            ("shift+up", "select_up"),
+            ("shift+down", "select_down"),
+            ("shift+home", "select_line_start"),
+            ("shift+end", "select_line_end"),
+            ("ctrl+shift+left", "select_word_left"),
+            ("ctrl+shift+right", "select_word_right"),
+            ("ctrl+left", "word_prev"),
+            ("ctrl+right", "word_next"),
+            ("ctrl+home", "file_start"),
+            ("ctrl+end", "file_end"),
+            ("alt+up", "move_line_up"),
+            ("alt+down", "move_line_down"),
+            ("ctrl+delete", "delete_word_after"),
+        ],
+    )
+    let normal: dict[str, str] = {}
+    bind(
+        normal,
+        [
+            ("h", "left"),
+            ("j", "down"),
+            ("k", "up"),
+            ("l", "right"),
+            ("left", "left"),
+            ("down", "down"),
+            ("up", "up"),
+            ("right", "right"),
+            ("backspace", "left"),
+            ("enter", "next_line_start"),
+            ("w", "word_next"),
+            ("b", "word_prev"),
+            ("e", "word_end"),
+            ("W", "bigword_next"),
+            ("B", "bigword_prev"),
+            ("0", "line_start"),
+            ("home", "line_start"),
+            ("^", "line_first_char"),
+            ("$", "line_end"),
+            ("end", "line_end"),
+            ("g g", "file_start"),
+            ("G", "file_end"),
+            ("ctrl+d", "half_down"),
+            ("ctrl+u", "half_up"),
+            ("pagedown", "page_down"),
+            ("pageup", "page_up"),
+            ("%", "match_bracket"),
+            ("{", "paragraph_prev"),
+            ("}", "paragraph_next"),
+            ("H", "screen_top"),
+            ("L", "screen_bottom"),
+            ("M", "screen_middle"),
+            ("z z", "center_cursor"),
+            ("i", "insert_before"),
+            ("a", "insert_after"),
+            ("I", "insert_line_start"),
+            ("A", "insert_line_end"),
+            ("o", "open_below"),
+            ("O", "open_above"),
+            ("v", "visual"),
+            ("V", "visual_line"),
+            (":", "command_mode"),
+            ("/", "search_forward"),
+            ("?", "search_backward"),
+            ("n", "search_next"),
+            ("N", "search_prev"),
+            ("*", "search_word"),
+            ("#", "search_word_back"),
+            ("x", "delete_char"),
+            ("delete", "delete_char"),
+            ("X", "delete_char_before"),
+            ("D", "delete_to_end"),
+            ("C", "change_to_end"),
+            ("s", "substitute_char"),
+            ("S", "change_line"),
+            ("p", "paste_after"),
+            ("P", "paste_before"),
+            ("u", "undo"),
+            ("ctrl+r", "redo"),
+            ("J", "join_lines"),
+            ("> >", "indent"),
+            ("< <", "dedent"),
+            ("~", "toggle_case"),
+            ("g c c", "toggle_comment"),
+            ("g t", "next_buffer"),
+            ("g T", "prev_buffer"),
+            ("] b", "next_buffer"),
+            ("[ b", "prev_buffer"),
+            ("tab", "next_buffer"),
+            ("shift+tab", "prev_buffer"),
+            ("g d", "goto_definition"),
+            ("g f", "open_file_under_cursor"),
+            (".", "repeat_last"),
+            ("Y", "yank_line"),
+            ("space f", "find_file"),
+            ("space e", "toggle_sidebar"),
+            ("space w", "save"),
+            ("space q", "quit"),
+            ("space p", "command_palette"),
+            ("space g", "grep"),
+            ("space b", "buffer_list"),
+            ("space /", "search_forward"),
+            ("space t", "next_theme"),
+            ("space n", "toggle_numbers"),
+        ],
+    )
+    let insert: dict[str, str] = {}
+    bind(
+        insert,
+        [
+            ("esc", "normal_mode"),
+            ("ctrl+w", "delete_word_before"),
+            ("ctrl+u", "delete_to_line_start"),
+            ("ctrl+v", "paste_before"),
+            ("shift+tab", "dedent"),
+        ],
+    )
+    let visual: dict[str, str] = {}
+    bind(
+        visual,
+        [
+            ("esc", "normal_mode"),
+            ("v", "normal_mode"),
+            ("V", "visual_line"),
+            ("h", "left"),
+            ("j", "down"),
+            ("k", "up"),
+            ("l", "right"),
+            ("left", "left"),
+            ("down", "down"),
+            ("up", "up"),
+            ("right", "right"),
+            ("w", "word_next"),
+            ("b", "word_prev"),
+            ("e", "word_end"),
+            ("0", "line_start"),
+            ("^", "line_first_char"),
+            ("$", "line_end"),
+            ("g g", "file_start"),
+            ("G", "file_end"),
+            ("%", "match_bracket"),
+            ("ctrl+d", "half_down"),
+            ("ctrl+u", "half_up"),
+            ("{", "paragraph_prev"),
+            ("}", "paragraph_next"),
+            ("d", "delete_selection"),
+            ("x", "delete_selection"),
+            ("delete", "delete_selection"),
+            ("backspace", "delete_selection"),
+            ("y", "yank_selection"),
+            ("c", "change_selection"),
+            ("s", "change_selection"),
+            (">", "indent"),
+            ("<", "dedent"),
+            ("g c", "toggle_comment"),
+            ("~", "toggle_case"),
+            ("p", "paste_over"),
+            ("o", "swap_anchor"),
+            (":", "command_mode"),
+            ("J", "join_lines"),
+            ("U", "upper_case"),
+            ("u", "lower_case"),
+            ("*", "search_selection"),
+            ("shift+tab", "dedent"),
+            ("tab", "indent"),
+        ],
+    )
+    let all: dict[str, dict[str, str]] = {}
+    all.set("global", global)
+    all.set("normal", normal)
+    all.set("insert", insert)
+    all.set("visual", visual)
+    return all
+}
+
+// One step of a --keys script: a key, or a mouse event.
+class ScriptEvent {
+    is_mouse: bool
+    key: Key
+    mouse: MouseEvent
+}
+
+fun named_key(name: str) -> Option[Key] {
+    let n = name.to_lower()
+    if n == "esc" {
+        return Some(Key.Esc)
+    }
+    if n == "cr" or n == "enter" {
+        return Some(Key.Enter)
+    }
+    if n == "tab" {
+        return Some(Key.Tab)
+    }
+    if n == "bs" or n == "backspace" {
+        return Some(Key.Backspace)
+    }
+    if n == "space" {
+        return Some(Key.Char(" "))
+    }
+    if n == "up" {
+        return Some(Key.Up)
+    }
+    if n == "down" {
+        return Some(Key.Down)
+    }
+    if n == "left" {
+        return Some(Key.Left)
+    }
+    if n == "right" {
+        return Some(Key.Right)
+    }
+    if n == "home" {
+        return Some(Key.Home)
+    }
+    if n == "end" {
+        return Some(Key.End)
+    }
+    if n == "del" or n == "delete" {
+        return Some(Key.Delete)
+    }
+    if n == "pageup" {
+        return Some(Key.PageUp)
+    }
+    if n == "pagedown" {
+        return Some(Key.PageDown)
+    }
+    if n == "lt" {
+        return Some(Key.Char("<"))
+    }
+    if n.starts_with("c-") and n.length() == 3 {
+        return Some(Key.Ctrl(n.substring(2, 3)))
+    }
+    // <s-up>, <c-right>, <a-down>, <c-s-left>, <s-tab>
+    if n.contains("-") {
+        let parts = n.split("-")
+        let base = parts[len(parts) - 1]
+        var mods = ""
+        for p in ["c", "a", "s"] {
+            if p in parts.slice(0, len(parts) - 1) {
+                mods += {"c": "ctrl+", "a": "alt+", "s": "shift+"}.get(p).unwrap()
+            }
+        }
+        if mods != "" {
+            return Some(Key.Mod(mods + base))
+        }
+    }
+    if n.starts_with("f") {
+        match n.substring(1, n.length()).parse_int() {
+            case Some(k) {
+                return Some(Key.F(k))
+            }
+            case None {}
+        }
+    }
+    return None
+}
+
+fun mouse_at(kind: MouseKind, button: int, spec: str) -> Option[MouseEvent] {
+    let parts = spec.split(",")
+    if len(parts) != 2 {
+        return None
+    }
+    let x = parts[0].trim().parse_int()?
+    let y = parts[1].trim().parse_int()?
+    return Some(MouseEvent(kind: kind, button: button, x: x, y: y))
+}
+
+// `ihello<esc>:w<cr>`, `<c-s>`, `<click:10,4>`, `<drag:12,4>`,
+// `<release:12,4>`, `<wheeldown:10,4>`, `<wheelup:10,4>`.
+fun parse_script(s: str) -> list[ScriptEvent] {
+    let out: list[ScriptEvent] = []
+    let cs = s.chars()
+    let blank = MouseEvent(kind: MouseKind.Move, button: -1, x: 0, y: 0)
+    var i = 0
+    while i < len(cs) {
+        if cs[i] == "<" {
+            var j = i + 1
+            var name = ""
+            while j < len(cs) and cs[j] != ">" {
+                name += cs[j]
+                j += 1
+            }
+            if j < len(cs) {
+                let colon = name.index_of(":")
+                if colon > 0 {
+                    let what = name.substring(0, colon)
+                    let spec = name.substring(colon + 1, name.length())
+                    var ev: Option[MouseEvent] = None
+                    if what == "click" {
+                        ev = mouse_at(MouseKind.Down, 0, spec)
+                    } else if what == "drag" {
+                        ev = mouse_at(MouseKind.Drag, 0, spec)
+                    } else if what == "release" {
+                        ev = mouse_at(MouseKind.Up, 0, spec)
+                    } else if what == "wheeldown" {
+                        ev = mouse_at(MouseKind.ScrollDown, -1, spec)
+                    } else if what == "wheelup" {
+                        ev = mouse_at(MouseKind.ScrollUp, -1, spec)
+                    } else if what == "middle" {
+                        ev = mouse_at(MouseKind.Down, 1, spec)
+                    } else if what == "sclick" {
+                        match mouse_at(MouseKind.Down, 0, spec) {
+                            case Some(m) {
+                                ev = Some(MouseEvent(kind: m.kind, button: 0, x: m.x, y: m.y, mods: 1))
+                            }
+                            case None {}
+                        }
+                    }
+                    match ev {
+                        case Some(m) {
+                            out.push(ScriptEvent(is_mouse: true, key: Key.Esc, mouse: m))
+                            i = j + 1
+                            continue
+                        }
+                        case None {}
+                    }
+                } else {
+                    match named_key(name) {
+                        case Some(k) {
+                            out.push(ScriptEvent(is_mouse: false, key: k, mouse: blank))
+                            i = j + 1
+                            continue
+                        }
+                        case None {}
+                    }
+                }
+            }
+        }
+        out.push(ScriptEvent(is_mouse: false, key: Key.Char(cs[i]), mouse: blank))
+        i += 1
+    }
+    return out
+}

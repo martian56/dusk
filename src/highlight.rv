@@ -1,0 +1,318 @@
+// Line-at-a-time highlighting driven by a Lang. A line starts in a state
+// carried from the line before: 0 is normal code, 1 is inside a block
+// comment, and 2 + k is inside the k-th multi-line string delimiter.
+
+from "./langs" import (
+    Lang,
+    NORMAL,
+    TYPE,
+    NUMBER,
+    STRING,
+    COMMENT,
+    FUNCTION,
+    OPERATOR,
+    DIRECTIVE,
+    KEY,
+    TAG,
+    HEADING,
+)
+
+class Spans {
+    // Flat triples: start char, end char (exclusive), kind.
+    items: list[int]
+    end_state: int
+}
+
+fun at(cs: list[str], i: int, s: str) -> bool {
+    if s == "" {
+        return false
+    }
+    let n = s.length()
+    if i + n > len(cs) {
+        return false
+    }
+    var j = 0
+    while j < n {
+        if cs[i + j] != s.char_at(j) {
+            return false
+        }
+        j += 1
+    }
+    return true
+}
+
+fun is_digit(c: str) -> bool = c >= "0" and c <= "9"
+
+fun is_alpha(c: str) -> bool = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or c.length() > 1
+
+fun is_ident(l: Lang, c: str, first: bool) -> bool {
+    if is_alpha(c) {
+        return true
+    }
+    if not first and is_digit(c) {
+        return true
+    }
+    return c != "" and l.ident_extra.contains(c)
+}
+
+fun find_from(cs: list[str], i: int, s: str) -> int {
+    var j = i
+    while j < len(cs) {
+        if at(cs, j, s) {
+            return j
+        }
+        j += 1
+    }
+    return -1
+}
+
+fun first_non_space(cs: list[str]) -> int {
+    var i = 0
+    while i < len(cs) and (cs[i] == " " or cs[i] == "\t") {
+        i += 1
+    }
+    return i
+}
+
+fun highlight_line(l: Lang, cs: list[str], start_state: int) -> Spans {
+    let out: list[int] = []
+    let n = len(cs)
+    var i = 0
+    var state = start_state
+
+    if l.markdown and state == 0 {
+        let f = first_non_space(cs)
+        if f < n and cs[f] == "#" {
+            out.push(0)
+            out.push(n)
+            out.push(HEADING)
+            return Spans(out, 0)
+        }
+        if f + 1 < n and (cs[f] == "-" or cs[f] == "*" or cs[f] == "+") and cs[f + 1] == " " {
+            out.push(f)
+            out.push(f + 1)
+            out.push(OPERATOR)
+            i = f + 1
+        } else if f < n and cs[f] == ">" {
+            out.push(f)
+            out.push(n)
+            out.push(COMMENT)
+            return Spans(out, 0)
+        }
+    }
+
+    while i < n {
+        if state == 1 {
+            let e = find_from(cs, i, l.block_end)
+            if e < 0 {
+                out.push(i)
+                out.push(n)
+                out.push(COMMENT)
+                return Spans(out, 1)
+            }
+            let stop = e + l.block_end.length()
+            out.push(i)
+            out.push(stop)
+            out.push(COMMENT)
+            i = stop
+            state = 0
+            continue
+        }
+        if state >= 2 {
+            let delim = l.multi[state - 2]
+            let e = find_from(cs, i, delim)
+            if e < 0 {
+                out.push(i)
+                out.push(n)
+                out.push(STRING)
+                return Spans(out, state)
+            }
+            let stop = e + delim.length()
+            out.push(i)
+            out.push(stop)
+            out.push(STRING)
+            i = stop
+            state = 0
+            continue
+        }
+        let c = cs[i]
+        if c == " " or c == "\t" {
+            i += 1
+            continue
+        }
+        if at(cs, i, l.line_comment) {
+            out.push(i)
+            out.push(n)
+            out.push(COMMENT)
+            return Spans(out, 0)
+        }
+        if at(cs, i, l.block_start) {
+            let e = find_from(cs, i + l.block_start.length(), l.block_end)
+            if e < 0 {
+                out.push(i)
+                out.push(n)
+                out.push(COMMENT)
+                return Spans(out, 1)
+            }
+            let stop = e + l.block_end.length()
+            out.push(i)
+            out.push(stop)
+            out.push(COMMENT)
+            i = stop
+            continue
+        }
+        var opened = -1
+        for k in range(len(l.multi)) {
+            if opened < 0 and at(cs, i, l.multi[k]) {
+                opened = k
+            }
+        }
+        if opened >= 0 {
+            let delim = l.multi[opened]
+            let e = find_from(cs, i + delim.length(), delim)
+            if e < 0 {
+                out.push(i)
+                out.push(n)
+                out.push(STRING)
+                return Spans(out, 2 + opened)
+            }
+            let stop = e + delim.length()
+            out.push(i)
+            out.push(stop)
+            out.push(STRING)
+            i = stop
+            continue
+        }
+        if c in l.quotes {
+            var j = i + 1
+            var closed = false
+            while j < n and not closed {
+                if cs[j] == "\\" {
+                    j += 2
+                } else if cs[j] == c {
+                    closed = true
+                    j += 1
+                } else {
+                    j += 1
+                }
+            }
+            let stop = min(j, n)
+            var kind = STRING
+            if l.key_sep != "" {
+                var k = stop
+                while k < n and cs[k] == " " {
+                    k += 1
+                }
+                if k < n and cs[k] == l.key_sep {
+                    kind = KEY
+                }
+            }
+            out.push(i)
+            out.push(stop)
+            out.push(kind)
+            i = stop
+            continue
+        }
+        if l.markup and c == "<" and i + 1 < n and (is_alpha(cs[i + 1]) or cs[i + 1] == "/") {
+            var j = i + 1
+            if cs[j] == "/" {
+                j += 1
+            }
+            while j < n and (is_ident(l, cs[j], false) or cs[j] == "-" or cs[j] == ":") {
+                j += 1
+            }
+            out.push(i)
+            out.push(j)
+            out.push(TAG)
+            i = j
+            continue
+        }
+        if l.directive != "" and c == l.directive and i + 1 < n and is_alpha(cs[i + 1]) {
+            var j = i + 1
+            while j < n and is_ident(l, cs[j], false) {
+                j += 1
+            }
+            out.push(i)
+            out.push(j)
+            out.push(DIRECTIVE)
+            // `#include <stdio.h>`: the path reads as a string.
+            if l.directive == "#" and at(cs, i, "#include") {
+                out.push(j)
+                out.push(n)
+                out.push(STRING)
+                return Spans(out, state)
+            }
+            i = j
+            continue
+        }
+        if is_digit(c) or (c == "." and i + 1 < n and is_digit(cs[i + 1])) {
+            var j = i + 1
+            while j < n and (is_ident(l, cs[j], false) or cs[j] == ".") {
+                if cs[j] == "." and j + 1 < n and cs[j + 1] == "." {
+                    break
+                }
+                j += 1
+            }
+            out.push(i)
+            out.push(j)
+            out.push(NUMBER)
+            i = j
+            continue
+        }
+        if is_ident(l, c, true) {
+            var j = i + 1
+            while j < n and is_ident(l, cs[j], false) {
+                j += 1
+            }
+            var word = ""
+            for k in range(i, j) {
+                word += cs[k]
+            }
+            let key = word.to_lower() if l.nocase else word
+            var kind = l.words.get(key).unwrap_or(NORMAL)
+            if kind == NORMAL {
+                var k = j
+                while k < n and cs[k] == " " {
+                    k += 1
+                }
+                if l.key_sep != "" and k < n and cs[k] == l.key_sep {
+                    kind = KEY
+                } else if k < n and cs[k] == "(" {
+                    kind = FUNCTION
+                } else if l.cap_types and c >= "A" and c <= "Z" {
+                    kind = TYPE
+                }
+            }
+            if kind != NORMAL {
+                out.push(i)
+                out.push(j)
+                out.push(kind)
+            }
+            i = j
+            continue
+        }
+        if "+-*/%=<>!&|^~?:".contains(c) {
+            out.push(i)
+            out.push(i + 1)
+            out.push(OPERATOR)
+        }
+        i += 1
+    }
+    return Spans(out, state)
+}
+
+// The kind at each character of a line, for rendering.
+fun kinds_for(spans: Spans, n: int) -> list[int] {
+    let out: list[int] = [0] * n
+    var t = 0
+    while t + 2 < len(spans.items) {
+        let s = spans.items[t]
+        let e = min(spans.items[t + 1], n)
+        let k = spans.items[t + 2]
+        for x in range(s, e) {
+            out[x] = k
+        }
+        t += 3
+    }
+    return out
+}

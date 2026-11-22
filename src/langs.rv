@@ -1,0 +1,1641 @@
+// Language definitions for highlighting, comment toggling, and detection.
+// Every built-in language is plain data, and a [[language]] table in the
+// config builds the same structure, so user languages work identically.
+
+class Lang {
+    name: str
+    exts: list[str]
+    // Exact file names, such as Makefile or Dockerfile.
+    files: list[str]
+    line_comment: str
+    block_start: str
+    block_end: str
+    quotes: list[str]
+    // Delimiters of strings that may span lines, such as """ or ```.
+    multi: list[str]
+    // word -> token kind (KEYWORD, TYPE, CONSTANT, BUILTIN)
+    words: dict[str, int]
+    // Words compare lowercased (SQL).
+    nocase: bool
+    // Extra identifier characters beyond letters, digits, and `_`.
+    ident_extra: str
+    // A capitalized word is a type (Raven, Rust, Java, ...).
+    cap_types: bool
+    // `#`-directives (C) or `@`-attributes (Raven, Python, Java).
+    directive: str
+    // `<tag>` markup (HTML, XML).
+    markup: bool
+    // A word before this separator at the start of a line is a key.
+    key_sep: str
+    // Markdown headings, emphasis, and lists.
+    markdown: bool
+    indent_after: str
+}
+
+let NORMAL = 0
+let KEYWORD = 1
+let TYPE = 2
+let CONSTANT = 3
+let NUMBER = 4
+let STRING = 5
+let COMMENT = 6
+let FUNCTION = 7
+let OPERATOR = 8
+let DIRECTIVE = 9
+let KEY = 10
+let TAG = 11
+let HEADING = 12
+let BUILTIN = 13
+let KIND_NAMES = [
+    "normal",
+    "keyword",
+    "type",
+    "constant",
+    "number",
+    "string",
+    "comment",
+    "function",
+    "operator",
+    "directive",
+    "key",
+    "tag",
+    "heading",
+    "builtin",
+]
+
+fun word_map(
+    keywords: list[str],
+    types: list[str],
+    consts: list[str],
+    builtins: list[str],
+) -> dict[str, int] {
+    let m: dict[str, int] = {}
+    for w in builtins {
+        m.set(w, BUILTIN)
+    }
+    for w in consts {
+        m.set(w, CONSTANT)
+    }
+    for w in types {
+        m.set(w, TYPE)
+    }
+    for w in keywords {
+        m.set(w, KEYWORD)
+    }
+    return m
+}
+
+fun lang(
+    name: str,
+    exts: list[str],
+    line_comment: str,
+    block: list[str],
+    keywords: list[str],
+    types: list[str],
+    consts: list[str],
+) -> Lang {
+    let none: list[str] = []
+    return Lang(
+        name: name,
+        exts: exts,
+        files: none,
+        line_comment: line_comment,
+        block_start: block[0] if len(block) == 2 else "",
+        block_end: block[1] if len(block) == 2 else "",
+        quotes: ["\"", "'"],
+        multi: none,
+        words: word_map(keywords, types, consts, none),
+        nocase: false,
+        ident_extra: "",
+        cap_types: false,
+        directive: "",
+        markup: false,
+        key_sep: "",
+        markdown: false,
+        indent_after: "{[(",
+    )
+}
+
+fun plain_lang() -> Lang {
+    let none: list[str] = []
+    return lang("text", none, "", none, none, none, none)
+}
+
+fun builtin_langs() -> list[Lang] {
+    let out: list[Lang] = []
+    let none: list[str] = []
+    let c_block = ["/*", "*/"]
+
+    let raven = lang(
+        "raven",
+        ["rv"],
+        "//",
+        c_block,
+        [
+            "fun",
+            "let",
+            "var",
+            "const",
+            "if",
+            "elif",
+            "else",
+            "while",
+            "for",
+            "in",
+            "match",
+            "case",
+            "return",
+            "break",
+            "continue",
+            "class",
+            "enum",
+            "trait",
+            "impl",
+            "import",
+            "from",
+            "as",
+            "and",
+            "or",
+            "not",
+            "spawn",
+            "defer",
+            "extern",
+            "macro",
+            "pub",
+            "self",
+            "Self",
+            "loop",
+            "is",
+            "where",
+            "type",
+        ],
+        [
+            "int",
+            "float",
+            "str",
+            "bool",
+            "char",
+            "list",
+            "dict",
+            "set",
+            "Option",
+            "Result",
+            "CStr",
+            "CInt",
+            "CSize",
+            "CPtr",
+        ],
+        ["true", "false", "None", "Some", "Ok", "Err"],
+    )
+    raven.cap_types = true
+    raven.directive = "@"
+    raven.multi = ["\"\"\""]
+    raven.words.set("print", BUILTIN)
+    raven.words.set("len", BUILTIN)
+    raven.words.set("range", BUILTIN)
+    out.push(raven)
+
+    let python = lang(
+        "python",
+        ["py", "pyw", "pyi"],
+        "#",
+        none,
+        [
+            "def",
+            "class",
+            "if",
+            "elif",
+            "else",
+            "while",
+            "for",
+            "in",
+            "return",
+            "import",
+            "from",
+            "as",
+            "try",
+            "except",
+            "finally",
+            "raise",
+            "with",
+            "yield",
+            "lambda",
+            "pass",
+            "break",
+            "continue",
+            "and",
+            "or",
+            "not",
+            "is",
+            "global",
+            "nonlocal",
+            "assert",
+            "del",
+            "async",
+            "await",
+            "match",
+            "case",
+        ],
+        ["int", "float", "str", "bool", "list", "dict", "set", "tuple", "bytes", "object", "type"],
+        ["True", "False", "None", "self", "cls"],
+    )
+    python.multi = ["\"\"\"", "'''"]
+    python.directive = "@"
+    python.cap_types = true
+    python.indent_after = ":{[("
+    for b in [
+        "print",
+        "len",
+        "range",
+        "open",
+        "isinstance",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "sum",
+        "min",
+        "max",
+        "abs",
+        "super",
+    ] {
+        python.words.set(b, BUILTIN)
+    }
+    out.push(python)
+
+    let js_kw = [
+        "function",
+        "const",
+        "let",
+        "var",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "return",
+        "break",
+        "continue",
+        "switch",
+        "case",
+        "default",
+        "class",
+        "extends",
+        "new",
+        "this",
+        "super",
+        "import",
+        "export",
+        "from",
+        "as",
+        "try",
+        "catch",
+        "finally",
+        "throw",
+        "typeof",
+        "instanceof",
+        "in",
+        "of",
+        "async",
+        "await",
+        "yield",
+        "delete",
+        "void",
+        "static",
+        "get",
+        "set",
+    ]
+    let js_consts = ["true", "false", "null", "undefined", "NaN", "Infinity"]
+    let js = lang(
+        "javascript",
+        ["js", "mjs", "cjs", "jsx"],
+        "//",
+        c_block,
+        js_kw,
+        [
+            "Array",
+            "Object",
+            "String",
+            "Number",
+            "Boolean",
+            "Promise",
+            "Map",
+            "Set",
+            "Date",
+            "Error",
+            "JSON",
+            "Math",
+        ],
+        js_consts,
+    )
+    js.quotes = ["\"", "'"]
+    js.multi = ["`"]
+    js.ident_extra = "$"
+    js.words.set("console", BUILTIN)
+    out.push(js)
+
+    let ts_kw = js_kw.copy()
+    for k in [
+        "interface",
+        "type",
+        "enum",
+        "implements",
+        "private",
+        "public",
+        "protected",
+        "readonly",
+        "declare",
+        "namespace",
+        "abstract",
+        "keyof",
+        "satisfies",
+    ] {
+        ts_kw.push(k)
+    }
+    let ts = lang(
+        "typescript",
+        ["ts", "tsx", "mts", "cts"],
+        "//",
+        c_block,
+        ts_kw,
+        [
+            "string",
+            "number",
+            "boolean",
+            "any",
+            "unknown",
+            "never",
+            "void",
+            "object",
+            "Array",
+            "Promise",
+            "Record",
+            "Partial",
+            "Map",
+            "Set",
+        ],
+        js_consts,
+    )
+    ts.multi = ["`"]
+    ts.ident_extra = "$"
+    ts.cap_types = true
+    ts.directive = "@"
+    out.push(ts)
+
+    let java = lang(
+        "java",
+        ["java"],
+        "//",
+        c_block,
+        [
+            "class",
+            "interface",
+            "enum",
+            "record",
+            "extends",
+            "implements",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "final",
+            "abstract",
+            "void",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "new",
+            "this",
+            "super",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "throws",
+            "import",
+            "package",
+            "instanceof",
+            "synchronized",
+            "var",
+            "yield",
+        ],
+        [
+            "int",
+            "long",
+            "short",
+            "byte",
+            "char",
+            "float",
+            "double",
+            "boolean",
+            "String",
+            "Object",
+            "List",
+            "Map",
+        ],
+        ["true", "false", "null"],
+    )
+    java.cap_types = true
+    java.directive = "@"
+    java.multi = ["\"\"\""]
+    out.push(java)
+
+    let c_kw = [
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "switch",
+        "case",
+        "default",
+        "return",
+        "break",
+        "continue",
+        "goto",
+        "struct",
+        "union",
+        "enum",
+        "typedef",
+        "static",
+        "extern",
+        "const",
+        "volatile",
+        "inline",
+        "sizeof",
+        "register",
+        "restrict",
+    ]
+    let c_types = [
+        "int",
+        "char",
+        "float",
+        "double",
+        "void",
+        "long",
+        "short",
+        "unsigned",
+        "signed",
+        "bool",
+        "size_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "FILE",
+    ]
+    let c = lang("c", ["c", "h"], "//", c_block, c_kw, c_types, ["true", "false", "NULL"])
+    c.directive = "#"
+    out.push(c)
+
+    let cpp_kw = c_kw.copy()
+    for k in [
+        "class",
+        "namespace",
+        "template",
+        "typename",
+        "public",
+        "private",
+        "protected",
+        "virtual",
+        "override",
+        "new",
+        "delete",
+        "this",
+        "using",
+        "try",
+        "catch",
+        "throw",
+        "constexpr",
+        "auto",
+        "friend",
+        "operator",
+        "noexcept",
+        "explicit",
+        "mutable",
+        "co_await",
+        "co_return",
+        "concept",
+        "requires",
+    ] {
+        cpp_kw.push(k)
+    }
+    let cpp_types = c_types.copy()
+    for t in ["string", "vector", "map", "unordered_map", "set", "shared_ptr", "unique_ptr", "std"] {
+        cpp_types.push(t)
+    }
+    let cpp = lang(
+        "cpp",
+        ["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+        "//",
+        c_block,
+        cpp_kw,
+        cpp_types,
+        ["true", "false", "nullptr", "NULL"],
+    )
+    cpp.directive = "#"
+    cpp.cap_types = true
+    out.push(cpp)
+
+    let cs = lang(
+        "csharp",
+        ["cs"],
+        "//",
+        c_block,
+        [
+            "class",
+            "struct",
+            "interface",
+            "enum",
+            "record",
+            "namespace",
+            "using",
+            "public",
+            "private",
+            "protected",
+            "internal",
+            "static",
+            "readonly",
+            "const",
+            "void",
+            "if",
+            "else",
+            "for",
+            "foreach",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "new",
+            "this",
+            "base",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "async",
+            "await",
+            "var",
+            "in",
+            "is",
+            "as",
+            "override",
+            "virtual",
+            "abstract",
+            "sealed",
+            "get",
+            "set",
+            "yield",
+            "lock",
+        ],
+        [
+            "int",
+            "long",
+            "short",
+            "byte",
+            "char",
+            "float",
+            "double",
+            "decimal",
+            "bool",
+            "string",
+            "object",
+            "List",
+            "Dictionary",
+            "Task",
+        ],
+        ["true", "false", "null"],
+    )
+    cs.cap_types = true
+    cs.directive = "#"
+    out.push(cs)
+
+    let go = lang(
+        "go",
+        ["go"],
+        "//",
+        c_block,
+        [
+            "func",
+            "package",
+            "import",
+            "var",
+            "const",
+            "type",
+            "struct",
+            "interface",
+            "map",
+            "chan",
+            "if",
+            "else",
+            "for",
+            "range",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "go",
+            "defer",
+            "select",
+            "fallthrough",
+            "goto",
+        ],
+        [
+            "int",
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+            "uint",
+            "uint8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "float32",
+            "float64",
+            "string",
+            "bool",
+            "byte",
+            "rune",
+            "error",
+            "any",
+        ],
+        ["true", "false", "nil", "iota"],
+    )
+    go.multi = ["`"]
+    for b in [
+        "make",
+        "len",
+        "cap",
+        "append",
+        "new",
+        "panic",
+        "recover",
+        "copy",
+        "delete",
+        "print",
+        "println",
+    ] {
+        go.words.set(b, BUILTIN)
+    }
+    out.push(go)
+
+    let rust = lang(
+        "rust",
+        ["rs"],
+        "//",
+        c_block,
+        [
+            "fn",
+            "let",
+            "mut",
+            "const",
+            "static",
+            "if",
+            "else",
+            "match",
+            "while",
+            "for",
+            "loop",
+            "in",
+            "return",
+            "break",
+            "continue",
+            "struct",
+            "enum",
+            "trait",
+            "impl",
+            "pub",
+            "use",
+            "mod",
+            "crate",
+            "self",
+            "Self",
+            "super",
+            "as",
+            "where",
+            "unsafe",
+            "async",
+            "await",
+            "move",
+            "ref",
+            "dyn",
+            "type",
+            "extern",
+        ],
+        [
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "i128",
+            "isize",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "u128",
+            "usize",
+            "f32",
+            "f64",
+            "bool",
+            "char",
+            "str",
+            "String",
+            "Vec",
+            "Option",
+            "Result",
+            "Box",
+        ],
+        ["true", "false", "None", "Some", "Ok", "Err"],
+    )
+    rust.cap_types = true
+    rust.directive = "#"
+    rust.quotes = ["\""]
+    out.push(rust)
+
+    let kotlin = lang(
+        "kotlin",
+        ["kt", "kts"],
+        "//",
+        c_block,
+        [
+            "fun",
+            "val",
+            "var",
+            "class",
+            "object",
+            "interface",
+            "data",
+            "sealed",
+            "enum",
+            "if",
+            "else",
+            "when",
+            "for",
+            "while",
+            "do",
+            "return",
+            "break",
+            "continue",
+            "import",
+            "package",
+            "is",
+            "in",
+            "as",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "override",
+            "open",
+            "private",
+            "public",
+            "internal",
+            "companion",
+            "suspend",
+            "this",
+            "super",
+        ],
+        [
+            "Int",
+            "Long",
+            "Double",
+            "Float",
+            "Boolean",
+            "String",
+            "Char",
+            "Unit",
+            "Any",
+            "List",
+            "Map",
+        ],
+        ["true", "false", "null"],
+    )
+    kotlin.cap_types = true
+    kotlin.directive = "@"
+    kotlin.multi = ["\"\"\""]
+    out.push(kotlin)
+
+    let swift = lang(
+        "swift",
+        ["swift"],
+        "//",
+        c_block,
+        [
+            "func",
+            "let",
+            "var",
+            "class",
+            "struct",
+            "enum",
+            "protocol",
+            "extension",
+            "if",
+            "else",
+            "guard",
+            "switch",
+            "case",
+            "default",
+            "for",
+            "in",
+            "while",
+            "repeat",
+            "return",
+            "break",
+            "continue",
+            "import",
+            "init",
+            "self",
+            "Self",
+            "super",
+            "throws",
+            "throw",
+            "try",
+            "catch",
+            "do",
+            "async",
+            "await",
+            "public",
+            "private",
+            "static",
+            "where",
+            "inout",
+        ],
+        ["Int", "Double", "Float", "Bool", "String", "Character", "Array", "Dictionary", "Optional"],
+        ["true", "false", "nil"],
+    )
+    swift.cap_types = true
+    swift.directive = "@"
+    swift.multi = ["\"\"\""]
+    out.push(swift)
+
+    let ruby = lang(
+        "ruby",
+        ["rb", "rake", "gemspec"],
+        "#",
+        none,
+        [
+            "def",
+            "class",
+            "module",
+            "if",
+            "elsif",
+            "else",
+            "unless",
+            "while",
+            "until",
+            "for",
+            "in",
+            "do",
+            "end",
+            "return",
+            "yield",
+            "begin",
+            "rescue",
+            "ensure",
+            "raise",
+            "case",
+            "when",
+            "then",
+            "and",
+            "or",
+            "not",
+            "self",
+            "super",
+            "require",
+            "include",
+            "attr_accessor",
+            "lambda",
+            "proc",
+        ],
+        none,
+        ["true", "false", "nil"],
+    )
+    ruby.cap_types = true
+    ruby.ident_extra = "?!@"
+    ruby.files = ["Gemfile", "Rakefile"]
+    out.push(ruby)
+
+    let php = lang(
+        "php",
+        ["php"],
+        "//",
+        c_block,
+        [
+            "function",
+            "class",
+            "interface",
+            "trait",
+            "extends",
+            "implements",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "if",
+            "else",
+            "elseif",
+            "foreach",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "new",
+            "echo",
+            "namespace",
+            "use",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "as",
+            "fn",
+            "match",
+            "const",
+        ],
+        ["int", "float", "string", "bool", "array", "void", "mixed"],
+        ["true", "false", "null"],
+    )
+    php.ident_extra = "$"
+    out.push(php)
+
+    let lua = lang(
+        "lua",
+        ["lua"],
+        "--",
+        ["--[[", "]]"],
+        [
+            "function",
+            "local",
+            "if",
+            "then",
+            "elseif",
+            "else",
+            "end",
+            "for",
+            "in",
+            "do",
+            "while",
+            "repeat",
+            "until",
+            "return",
+            "break",
+            "and",
+            "or",
+            "not",
+            "goto",
+        ],
+        none,
+        ["true", "false", "nil"],
+    )
+    for b in [
+        "print",
+        "pairs",
+        "ipairs",
+        "require",
+        "table",
+        "string",
+        "math",
+        "type",
+        "tostring",
+        "tonumber",
+    ] {
+        lua.words.set(b, BUILTIN)
+    }
+    out.push(lua)
+
+    let sh = lang(
+        "bash",
+        ["sh", "bash", "zsh"],
+        "#",
+        none,
+        [
+            "if",
+            "then",
+            "else",
+            "elif",
+            "fi",
+            "for",
+            "while",
+            "until",
+            "do",
+            "done",
+            "case",
+            "esac",
+            "in",
+            "function",
+            "return",
+            "local",
+            "export",
+            "readonly",
+            "source",
+            "exit",
+            "shift",
+        ],
+        none,
+        ["true", "false"],
+    )
+    sh.ident_extra = "$-"
+    sh.files = [".bashrc", ".zshrc", ".profile"]
+    for b in ["echo", "cd", "ls", "grep", "sed", "awk", "cat", "printf", "test", "set", "unset"] {
+        sh.words.set(b, BUILTIN)
+    }
+    out.push(sh)
+
+    let ps = lang(
+        "powershell",
+        ["ps1", "psm1"],
+        "#",
+        ["<#", "#>"],
+        [
+            "function",
+            "param",
+            "if",
+            "elseif",
+            "else",
+            "foreach",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "return",
+            "break",
+            "continue",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "in",
+        ],
+        none,
+        ["$true", "$false", "$null"],
+    )
+    ps.ident_extra = "$-"
+    out.push(ps)
+
+    let sql = lang(
+        "sql",
+        ["sql"],
+        "--",
+        c_block,
+        [
+            "select",
+            "from",
+            "where",
+            "insert",
+            "into",
+            "values",
+            "update",
+            "set",
+            "delete",
+            "create",
+            "table",
+            "drop",
+            "alter",
+            "add",
+            "index",
+            "view",
+            "join",
+            "left",
+            "right",
+            "inner",
+            "outer",
+            "on",
+            "group",
+            "by",
+            "order",
+            "having",
+            "limit",
+            "offset",
+            "and",
+            "or",
+            "not",
+            "in",
+            "is",
+            "as",
+            "distinct",
+            "union",
+            "all",
+            "primary",
+            "key",
+            "foreign",
+            "references",
+            "default",
+            "unique",
+            "begin",
+            "commit",
+            "rollback",
+            "case",
+            "when",
+            "then",
+            "else",
+            "end",
+            "exists",
+            "like",
+            "between",
+        ],
+        [
+            "int",
+            "integer",
+            "bigint",
+            "text",
+            "varchar",
+            "char",
+            "boolean",
+            "date",
+            "timestamp",
+            "real",
+            "float",
+            "numeric",
+            "serial",
+            "blob",
+        ],
+        ["null", "true", "false"],
+    )
+    sql.nocase = true
+    for b in ["count", "sum", "avg", "min", "max", "coalesce", "now"] {
+        sql.words.set(b, BUILTIN)
+    }
+    out.push(sql)
+
+    let html = lang(
+        "html",
+        ["html", "htm", "xml", "svg", "vue"],
+        "",
+        ["<!--", "-->"],
+        none,
+        none,
+        none,
+    )
+    html.markup = true
+    html.indent_after = ""
+    out.push(html)
+
+    let css = lang(
+        "css",
+        ["css", "scss", "less"],
+        "",
+        c_block,
+        ["important", "media", "import", "keyframes", "supports", "font-face"],
+        none,
+        [
+            "none",
+            "auto",
+            "inherit",
+            "initial",
+            "block",
+            "flex",
+            "grid",
+            "inline",
+            "absolute",
+            "relative",
+            "fixed",
+        ],
+    )
+    css.ident_extra = "-"
+    css.key_sep = ":"
+    css.directive = "@"
+    out.push(css)
+
+    let json = lang("json", ["json", "jsonc"], "//", c_block, none, none, ["true", "false", "null"])
+    json.quotes = ["\""]
+    json.key_sep = ":"
+    out.push(json)
+
+    let yaml = lang(
+        "yaml",
+        ["yaml", "yml"],
+        "#",
+        none,
+        none,
+        none,
+        ["true", "false", "null", "yes", "no", "on", "off"],
+    )
+    yaml.key_sep = ":"
+    yaml.ident_extra = "-"
+    yaml.indent_after = ":"
+    out.push(yaml)
+
+    let toml = lang(
+        "toml",
+        ["toml", "ini", "cfg", "conf"],
+        "#",
+        none,
+        none,
+        none,
+        ["true", "false"],
+    )
+    toml.key_sep = "="
+    toml.ident_extra = "-."
+    toml.multi = ["\"\"\""]
+    out.push(toml)
+
+    let md = lang("markdown", ["md", "markdown"], "", ["<!--", "-->"], none, none, none)
+    md.markdown = true
+    md.quotes = ["`"]
+    md.multi = ["```"]
+    md.indent_after = ""
+    out.push(md)
+
+    let zig = lang(
+        "zig",
+        ["zig"],
+        "//",
+        none,
+        [
+            "fn",
+            "const",
+            "var",
+            "pub",
+            "if",
+            "else",
+            "while",
+            "for",
+            "switch",
+            "return",
+            "break",
+            "continue",
+            "struct",
+            "enum",
+            "union",
+            "error",
+            "try",
+            "catch",
+            "defer",
+            "errdefer",
+            "comptime",
+            "inline",
+            "export",
+            "extern",
+            "test",
+            "and",
+            "or",
+            "orelse",
+            "unreachable",
+        ],
+        [
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "usize",
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "isize",
+            "f32",
+            "f64",
+            "bool",
+            "void",
+            "type",
+            "anyerror",
+        ],
+        ["true", "false", "null", "undefined"],
+    )
+    zig.directive = "@"
+    out.push(zig)
+
+    let dart = lang(
+        "dart",
+        ["dart"],
+        "//",
+        c_block,
+        [
+            "class",
+            "extends",
+            "implements",
+            "with",
+            "mixin",
+            "abstract",
+            "final",
+            "const",
+            "var",
+            "void",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "default",
+            "return",
+            "break",
+            "continue",
+            "new",
+            "this",
+            "super",
+            "import",
+            "export",
+            "library",
+            "part",
+            "async",
+            "await",
+            "yield",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "late",
+            "required",
+            "static",
+            "get",
+            "set",
+        ],
+        [
+            "int",
+            "double",
+            "num",
+            "String",
+            "bool",
+            "List",
+            "Map",
+            "Set",
+            "Future",
+            "Stream",
+            "dynamic",
+        ],
+        ["true", "false", "null"],
+    )
+    dart.cap_types = true
+    dart.directive = "@"
+    out.push(dart)
+
+    let hs = lang(
+        "haskell",
+        ["hs"],
+        "--",
+        ["{-", "-}"],
+        [
+            "module",
+            "where",
+            "import",
+            "qualified",
+            "as",
+            "hiding",
+            "data",
+            "type",
+            "newtype",
+            "class",
+            "instance",
+            "deriving",
+            "let",
+            "in",
+            "if",
+            "then",
+            "else",
+            "case",
+            "of",
+            "do",
+            "forall",
+        ],
+        none,
+        ["True", "False", "Nothing", "Just"],
+    )
+    hs.cap_types = true
+    hs.ident_extra = "'"
+    hs.quotes = ["\""]
+    out.push(hs)
+
+    let ex = lang(
+        "elixir",
+        ["ex", "exs"],
+        "#",
+        none,
+        [
+            "def",
+            "defp",
+            "defmodule",
+            "defstruct",
+            "defmacro",
+            "do",
+            "end",
+            "fn",
+            "if",
+            "else",
+            "unless",
+            "case",
+            "cond",
+            "when",
+            "with",
+            "for",
+            "receive",
+            "try",
+            "rescue",
+            "after",
+            "import",
+            "alias",
+            "require",
+            "use",
+            "and",
+            "or",
+            "not",
+            "in",
+        ],
+        none,
+        ["true", "false", "nil"],
+    )
+    ex.cap_types = true
+    ex.multi = ["\"\"\""]
+    ex.ident_extra = "?!"
+    out.push(ex)
+
+    let docker = lang(
+        "dockerfile",
+        ["dockerfile"],
+        "#",
+        none,
+        [
+            "FROM",
+            "RUN",
+            "CMD",
+            "COPY",
+            "ADD",
+            "ENV",
+            "ARG",
+            "WORKDIR",
+            "EXPOSE",
+            "ENTRYPOINT",
+            "VOLUME",
+            "USER",
+            "LABEL",
+            "HEALTHCHECK",
+            "SHELL",
+            "AS",
+        ],
+        none,
+        none,
+    )
+    docker.files = ["Dockerfile", "Containerfile"]
+    out.push(docker)
+
+    let make = lang(
+        "makefile",
+        ["mk", "mak"],
+        "#",
+        none,
+        [
+            "ifeq",
+            "ifneq",
+            "ifdef",
+            "ifndef",
+            "else",
+            "endif",
+            "include",
+            "define",
+            "endef",
+            "export",
+        ],
+        none,
+        none,
+    )
+    make.files = ["Makefile", "makefile", "GNUmakefile"]
+    make.key_sep = ":"
+    make.indent_after = ""
+    out.push(make)
+
+    let r = lang(
+        "r",
+        ["r", "R"],
+        "#",
+        none,
+        [
+            "function",
+            "if",
+            "else",
+            "for",
+            "while",
+            "repeat",
+            "return",
+            "next",
+            "break",
+            "in",
+            "library",
+        ],
+        none,
+        ["TRUE", "FALSE", "NULL", "NA", "Inf", "NaN"],
+    )
+    r.ident_extra = "."
+    out.push(r)
+
+    let scala = lang(
+        "scala",
+        ["scala", "sc"],
+        "//",
+        c_block,
+        [
+            "def",
+            "val",
+            "var",
+            "class",
+            "object",
+            "trait",
+            "extends",
+            "with",
+            "case",
+            "match",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "yield",
+            "return",
+            "import",
+            "package",
+            "new",
+            "this",
+            "super",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "override",
+            "private",
+            "protected",
+            "implicit",
+            "lazy",
+            "sealed",
+            "given",
+            "using",
+            "enum",
+            "then",
+        ],
+        [
+            "Int",
+            "Long",
+            "Double",
+            "Float",
+            "Boolean",
+            "String",
+            "Unit",
+            "Any",
+            "List",
+            "Map",
+            "Option",
+            "Seq",
+        ],
+        ["true", "false", "null", "None", "Some"],
+    )
+    scala.cap_types = true
+    scala.directive = "@"
+    scala.multi = ["\"\"\""]
+    out.push(scala)
+
+    return out
+}
+
+fun lang_for_path(langs: list[Lang], path: str) -> int {
+    let slash = max(path.last_index_of("/"), path.last_index_of("\\"))
+    let base = path.substring(slash + 1, path.length())
+    let dot = base.last_index_of(".")
+    let ext = base.substring(dot + 1, base.length()).to_lower() if dot >= 0 else ""
+    for i in range(len(langs)) {
+        let l = langs[i]
+        if base in l.files {
+            return i
+        }
+        if ext != "" and ext in l.exts {
+            return i
+        }
+        if base.to_lower() == l.name {
+            return i
+        }
+    }
+    return -1
+}
+
+fun lang_named(langs: list[Lang], name: str) -> int {
+    for i in range(len(langs)) {
+        if langs[i].name == name {
+            return i
+        }
+    }
+    return -1
+}

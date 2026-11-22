@@ -1,0 +1,64 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from "./editor" import Ed, new_editor
+from "./keys" import parse_script
+
+fun run_keys(text: str, keys: str) -> Ed {
+    let ed = new_editor([])
+    let _ = ed.doc().insert_at(0, 0, text)
+    ed.doc().dirty = false
+    for ev in parse_script(keys) {
+        ed.handle_mouse(ev.mouse) if ev.is_mouse else ed.handle_key(ev.key)
+    }
+    return ed
+}
+
+fun text(ed: Ed) -> str = "|".join(ed.doc().lines)
+
+fun test_insert_and_escape() {
+    assert_eq_str(text(run_keys("", "ihello<esc>")), "hello")
+    assert_eq_str(text(run_keys("a", "ohi<esc>Oup<esc>")), "a|up|hi")
+}
+
+fun test_operators_and_counts() {
+    assert_eq_str(text(run_keys("one two three", "dw")), "two three")
+    assert_eq_str(text(run_keys("a\nb\nc\nd", "2dd")), "c|d")
+    assert_eq_str(text(run_keys("f(a, b)", "f(ldt,")), "f(, b)")
+    assert_eq_str(text(run_keys("f(a, b)", "fbci(x<esc>")), "f(x)")
+    assert_eq_str(text(run_keys("x = 1", "yyp")), "x = 1|x = 1")
+}
+
+fun test_undo_groups_an_insert_session() {
+    assert_eq_str(text(run_keys("start", "A one<cr>two<esc>u")), "start")
+}
+
+fun test_dot_repeats_last_change() {
+    assert_eq_str(text(run_keys("a\nb\nc", "dd.")), "c")
+}
+
+fun test_visual_and_comment() {
+    assert_eq_str(text(run_keys("a\nb\nc", "Vjd")), "c")
+    assert_eq_str(text(run_keys("x\ny", "gcc")), "x|y")
+}
+
+fun test_replace_command() {
+    assert_eq_str(text(run_keys("a-b\nc-d", ":%s/-/+/g<cr>")), "a+b|c+d")
+}
+
+fun test_shift_selection_types_over() {
+    assert_eq_str(text(run_keys("hello world", "i<s-right><s-right><s-right>J<esc>")), "Jlo world")
+}
+
+fun test_insert_mapping_waits_then_types() {
+    let ed = new_editor([])
+    ed.keys.get("insert").unwrap().set("j k", "normal_mode")
+    for ev in parse_script("ijar jk") {
+        ed.handle_key(ev.key)
+    }
+    assert_eq_str(ed.doc().lines[0], "jar ")
+    assert_eq_str(ed.mode, "normal")
+}
+
+fun test_leader_key_waits_for_the_next_key() {
+    assert_true(run_keys("abc", "<space>q").quit)
+    assert_false(run_keys("abc", "<space>").quit)
+}

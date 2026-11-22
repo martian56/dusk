@@ -1,0 +1,638 @@
+// Drawing one frame of the editor. Also records the layout on the editor so
+// mouse positions can be mapped back to buffers, files, and tabs.
+
+from "github.com/martian56/plumage" import Frame
+from "github.com/martian56/plumage/buffer" import Buffer
+from "github.com/martian56/plumage/style" import Style
+from "github.com/martian56/wingspan" import width, truncate
+from "./editor" import Ed, COMMANDS
+from "./doc" import Doc
+from "./langs" import KIND_NAMES
+from "./highlight" import highlight_line, kinds_for
+
+fun put(buf: Buffer, x: int, y: int, s: str, st: Style) -> int {
+    if y < 0 or y >= buf.h or x >= buf.w {
+        return x
+    }
+    return buf.set_string(x, y, s, st)
+}
+
+fun fill_row(buf: Buffer, x0: int, x1: int, y: int, st: Style) {
+    for x in range(max(0, x0), min(x1, buf.w)) {
+        buf.set(x, y, " ", st)
+    }
+}
+
+fun ensure_hl(ed: Ed, d: Doc, upto: int) {
+    if d.lang < 0 {
+        return
+    }
+    let l = ed.langs[d.lang]
+    let n = len(d.lines)
+    if len(d.hl) == 0 {
+        d.hl.push(0)
+        d.hl_valid = 0
+    }
+    d.hl_valid = min(d.hl_valid, n - 1)
+    while len(d.hl) > d.hl_valid + 1 {
+        let _ = d.hl.pop()
+    }
+    let target = min(upto, n - 1)
+    while d.hl_valid < target {
+        let r = d.hl_valid
+        let sp = highlight_line(l, d.lines[r].chars(), d.hl[r])
+        d.hl.push(sp.end_state)
+        d.hl_valid += 1
+    }
+}
+
+fun mode_label(ed: Ed) -> (str, str) {
+    let m = ed.mode
+    if m == "insert" {
+        return ("INSERT", "ui.mode.insert")
+    }
+    if m == "visual" {
+        return ("VISUAL", "ui.mode.visual")
+    }
+    if m == "vline" {
+        return ("V-LINE", "ui.mode.visual")
+    }
+    if m == "prompt" or m == "picker" {
+        return ("COMMAND", "ui.mode.command")
+    }
+    if m == "tree" {
+        return ("FILES", "ui.mode.command")
+    }
+    return ("NORMAL", "ui.mode.normal")
+}
+
+fun render(ed: Ed, f: Frame) {
+    let buf = f.buf
+    let t = ed.theme
+    let bg = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.bg"))
+    let bar = Style.new().fg(t.c("ui.bar.fg")).bg(t.c("ui.bar"))
+    ed.w = buf.w
+    ed.h = buf.h
+    for y in range(buf.h) {
+        fill_row(buf, 0, buf.w, y, bg)
+    }
+    let panel_h = min(12, buf.h / 3) if ed.show_panel and len(ed.panel) > 0 else 0
+    let body_h = max(1, buf.h - 3 - panel_h)
+    let side_w = min(34, max(22, buf.w / 5)) if ed.show_tree and buf.w >= 60 else 0
+    let d = ed.doc()
+    let digits = "${len(d.lines)}".length()
+    let gutter = 0 if ed.cfg.numbers == "off" else max(3, digits) + 2
+    ed.side_w = side_w
+    ed.text_x = side_w
+    ed.text_y = 1
+    ed.text_h = body_h
+    ed.gutter_w = gutter
+    ed.text_w = max(1, buf.w - side_w - gutter)
+    ed.scroll_into_view()
+
+    draw_tabs(ed, buf, bar)
+    if side_w > 0 {
+        draw_tree(ed, buf, side_w, body_h)
+    }
+    draw_text(ed, buf, d, side_w, gutter, body_h)
+    if panel_h > 0 {
+        draw_panel(ed, buf, 1 + body_h, panel_h)
+    }
+    draw_status(ed, buf, buf.h - 2)
+    draw_message(ed, buf, buf.h - 1)
+    if ed.mode == "picker" {
+        draw_picker(ed, buf)
+    } else if ed.mode == "help" {
+        draw_help(ed, buf, body_h)
+    } else if ed.mode == "prompt" and ed.prompt_kind == "command" and ed.prompt != "" {
+        draw_completions(ed, buf)
+    }
+}
+
+fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
+    let t = ed.theme
+    fill_row(buf, 0, buf.w, 0, bar)
+    let hits: list[(int, int, int)] = []
+    var x = 0
+    let brand = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.bar")).bold()
+    x = put(buf, x, 0, " dusk ", brand)
+    for i in range(len(ed.docs)) {
+        let dd = ed.docs[i]
+        var name = dd.path.substring(dd.path.last_index_of("/") + 1, dd.path.length()) if dd.path != "" else "[new]"
+        if dd.dirty {
+            name += " ●"
+        }
+        let active = i == ed.cur
+        let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.tab.active")).bold() if active else Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.bar"))
+        let label = " ${name} "
+        let x0 = x
+        x = put(buf, x, 0, label, st)
+        if active {
+            let cx = x
+            x = put(buf, x, 0, "× ", Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.tab.active")))
+            hits.push((x0, cx, i))
+            hits.push((cx, x, -1))
+        } else {
+            hits.push((x0, x, i))
+        }
+        x = put(buf, x, 0, "│", Style.new().fg(t.c("ui.border")).bg(t.c("ui.bar")))
+        if x >= buf.w {
+            break
+        }
+    }
+    ed.tab_hits = hits
+}
+
+fun draw_tree(ed: Ed, buf: Buffer, w: int, h: int) {
+    let t = ed.theme
+    let base = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.sidebar"))
+    for y in range(1, 1 + h) {
+        fill_row(buf, 0, w - 1, y, base)
+        buf.set(w - 1, y, "│", Style.new().fg(t.c("ui.border")).bg(t.c("ui.bg")))
+    }
+    if ed.tree_sel < ed.tree_top {
+        ed.tree_top = ed.tree_sel
+    }
+    if ed.mode == "tree" and ed.tree_sel >= ed.tree_top + h {
+        ed.tree_top = ed.tree_sel - h + 1
+    }
+    let current = ed.doc().path
+    for i in range(h) {
+        let k = ed.tree_top + i
+        if k >= len(ed.tree) {
+            break
+        }
+        let it = ed.tree[k]
+        let y = 1 + i
+        var st = base
+        if ed.mode == "tree" and k == ed.tree_sel {
+            st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup.selected")).bold()
+        } else if it.path == current {
+            st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.cursorline")).bold()
+        }
+        fill_row(buf, 0, w - 1, y, st)
+        let icon = ("▾ " if it.open else "▸ ") if it.dir else "  "
+        let fg = Style.new().fg(t.c("ui.dir") if it.dir else t.c("ui.fg")).bg(st.bg)
+        let text = truncate(" " + "  " * it.depth + icon + it.name, w - 2)
+        let _ = put(buf, 0, y, text, fg if not (ed.mode == "tree" and k == ed.tree_sel) else st)
+    }
+}
+
+fun in_sel(ed: Ed, r: int, c: int) -> bool {
+    if ed.mode != "visual" and ed.mode != "vline" {
+        return false
+    }
+    let (r1, c1, r2, c2) = ed.sel_range()
+    if r < r1 or r > r2 {
+        return false
+    }
+    if ed.mode == "vline" {
+        return true
+    }
+    if r == r1 and c < c1 {
+        return false
+    }
+    if r == r2 and c >= c2 {
+        return false
+    }
+    return true
+}
+
+fun search_marks(ed: Ed, line: str) -> list[bool] {
+    let cs = line.chars()
+    let marks: list[bool] = [false] * len(cs)
+    var pat = ed.search
+    if ed.mode == "prompt" and ed.prompt_kind == "search" {
+        pat = ed.prompt
+    }
+    if pat == "" {
+        return marks
+    }
+    let nocase = pat == pat.to_lower()
+    let pc = (pat.to_lower() if nocase else pat).chars()
+    let lc = (line.to_lower() if nocase else line).chars()
+    var i = 0
+    while i + len(pc) <= len(lc) {
+        var ok = true
+        var j = 0
+        while ok and j < len(pc) {
+            if lc[i + j] != pc[j] {
+                ok = false
+            }
+            j += 1
+        }
+        if ok {
+            for k in range(i, i + len(pc)) {
+                marks[k] = true
+            }
+            i += len(pc)
+        } else {
+            i += 1
+        }
+    }
+    return marks
+}
+
+fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
+    let t = ed.theme
+    let tw = ed.cfg.tab_width
+    let text_left = x0 + gutter
+    let cols = max(1, buf.w - text_left)
+    let cur_cells = cell_col(d.lines[d.row], d.col, tw)
+    if cur_cells < d.left {
+        d.left = cur_cells
+    } else if cur_cells >= d.left + cols {
+        d.left = cur_cells - cols + 1
+    }
+    ensure_hl(ed, d, d.top + h)
+    var bracket_r = -1
+    var bracket_c = -1
+    match ed.match_bracket_pos() {
+        case Some((r, c)) {
+            if r != d.row or c != d.col {
+                bracket_r = r
+                bracket_c = c
+            }
+        }
+        case None {}
+    }
+    let show_cursor = ed.mode == "normal" or ed.mode == "insert" or ed.mode == "visual" or ed.mode == "vline"
+    for i in range(h) {
+        let y = 1 + i
+        let r = d.top + i
+        if r >= len(d.lines) {
+            let _ = put(buf, x0, y, " ~", Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.bg")))
+            continue
+        }
+        let is_cur = r == d.row
+        let row_bg = t.c("ui.cursorline") if is_cur and ed.mode != "visual" and ed.mode != "vline" else t.c("ui.bg")
+        fill_row(buf, x0, buf.w, y, Style.new().bg(row_bg))
+        if gutter > 0 {
+            var num = r + 1
+            if ed.cfg.numbers == "relative" and not is_cur {
+                num = r - d.row if r > d.row else d.row - r
+            }
+            let label = "${num}"
+            let gst = Style.new().fg(t.c("ui.gutter.current") if is_cur else t.c("ui.gutter")).bg(row_bg)
+            let _ = put(buf, x0 + gutter - 2 - label.length(), y, label, gst)
+        }
+        let line = d.lines[r]
+        let cs = line.chars()
+        var kinds: list[int] = [0] * len(cs)
+        if d.lang >= 0 {
+            let sp = highlight_line(ed.langs[d.lang], cs, d.hl[r])
+            kinds = kinds_for(sp, len(cs))
+        }
+        let marks = search_marks(ed, line)
+        var cell = 0
+        var leading = true
+        for c in range(len(cs) + 1) {
+            let at_end = c == len(cs)
+            let ch = " " if at_end else cs[c]
+            if not at_end and ch != " " and ch != "\t" {
+                leading = false
+            }
+            var wcells = 1
+            if ch == "\t" {
+                wcells = tw - cell % tw
+            } else if ch.length() > 1 {
+                wcells = max(1, width(ch))
+            }
+            let sx = cell - d.left
+            cell += wcells
+            if sx + wcells <= 0 {
+                continue
+            }
+            if sx >= cols {
+                break
+            }
+            var fg = t.c(KIND_NAMES[kinds[c]]) if not at_end else t.c("ui.fg")
+            var cbg = row_bg
+            var bold = false
+            if not at_end and marks[c] {
+                cbg = t.c("ui.search")
+            }
+            if in_sel(ed, r, c) and not (at_end and ed.mode == "visual") {
+                cbg = t.c("ui.selection")
+            }
+            if r == bracket_r and c == bracket_c {
+                cbg = t.c("ui.match")
+                bold = true
+            }
+            let is_cursor = show_cursor and r == d.row and c == d.col
+            if is_cursor {
+                cbg = t.c("ui.mode.insert") if ed.mode == "insert" else t.c("ui.cursor")
+                fg = t.c("ui.bg")
+            }
+            var st = Style.new().fg(fg).bg(cbg)
+            if bold or (not at_end and kinds[c] == 1) {
+                st = st.bold()
+            }
+            if not at_end and kinds[c] == 6 {
+                st = st.italic()
+            }
+            var glyph = ch
+            if ch == "\t" {
+                glyph = " "
+            } else if leading and ch == " " and cell > tw and (cell - 1) % tw == 0 and not is_cursor {
+                glyph = "┊"
+                st = Style.new().fg(t.c("ui.border")).bg(cbg)
+            }
+            if at_end and not is_cursor and cbg == row_bg {
+                continue
+            }
+            let px = text_left + max(0, sx)
+            if ch == "\t" {
+                for k in range(wcells) {
+                    if px + k < buf.w and sx + k >= 0 {
+                        buf.set(text_left + sx + k, y, " ", st)
+                    }
+                }
+            } else if px < buf.w {
+                buf.set(px, y, glyph, st)
+            }
+        }
+    }
+}
+
+// The screen cell where character `col` of `line` starts.
+fun cell_col(line: str, col: int, tw: int) -> int {
+    let cs = line.chars()
+    var cell = 0
+    for c in range(min(col, len(cs))) {
+        if cs[c] == "\t" {
+            cell += tw - cell % tw
+        } else if cs[c].length() > 1 {
+            cell += max(1, width(cs[c]))
+        } else {
+            cell += 1
+        }
+    }
+    return cell
+}
+
+fun draw_status(ed: Ed, buf: Buffer, y: int) {
+    let t = ed.theme
+    let d = ed.doc()
+    let bar = Style.new().fg(t.c("ui.bar.fg")).bg(t.c("ui.bar"))
+    fill_row(buf, 0, buf.w, y, bar)
+    let (label, color) = mode_label(ed)
+    var x = put(buf, 0, y, " ${label} ", Style.new().fg(t.c("ui.bg")).bg(t.c(color)).bold())
+    let name = d.path if d.path != "" else "[new]"
+    x = put(buf, x, y, " ${name}", bar.bold())
+    if d.dirty {
+        x = put(buf, x, y, " ●", Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")))
+    }
+    if ed.pending != "" or ed.op != "" or ed.count > 0 {
+        let counted = "${ed.count}" if ed.count > 0 else ""
+        let keys = "${counted}${ed.op} ${ed.pending}".trim()
+        x = put(buf, x + 2, y, keys, Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")))
+    }
+    let lname = ed.langs[d.lang].name if d.lang >= 0 else "text"
+    let pct = 100 * (d.row + 1) / len(d.lines)
+    let right = "${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
+    let _ = put(buf, max(x + 1, buf.w - right.length()), y, right, bar)
+}
+
+fun draw_message(ed: Ed, buf: Buffer, y: int) {
+    let t = ed.theme
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.bg"))
+    if ed.mode == "prompt" {
+        let k = ed.prompt_kind
+        var lead = ":"
+        if k == "search" {
+            lead = "?" if ed.search_back else "/"
+        } else if k == "goto" {
+            lead = "Go to line: "
+        } else if k == "grep" {
+            lead = "Search the project: "
+        } else if k == "rename" {
+            lead = "Rename to: "
+        } else if k == "save_as" {
+            lead = "Save as: "
+        }
+        var x = put(buf, 0, y, lead + ed.prompt, st)
+        buf.set(min(x, buf.w - 1), y, " ", Style.new().bg(t.c("ui.cursor")))
+        return
+    }
+    if ed.message != "" {
+        let mst = Style.new().fg(t.c("ui.error")).bg(t.c("ui.bg")).bold() if ed.error else st
+        let _ = put(buf, 0, y, truncate(ed.message, buf.w - 1), mst)
+    }
+}
+
+fun draw_box(ed: Ed, buf: Buffer, x: int, y: int, w: int, h: int, title: str) {
+    let t = ed.theme
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
+    let border = Style.new().fg(t.c("ui.border")).bg(t.c("ui.popup"))
+    for yy in range(y, y + h) {
+        fill_row(buf, x, x + w, yy, st)
+    }
+    for xx in range(x, x + w) {
+        buf.set(xx, y, "─", border)
+        buf.set(xx, y + h - 1, "─", border)
+    }
+    for yy in range(y, y + h) {
+        buf.set(x, yy, "│", border)
+        buf.set(x + w - 1, yy, "│", border)
+    }
+    buf.set(x, y, "╭", border)
+    buf.set(x + w - 1, y, "╮", border)
+    buf.set(x, y + h - 1, "╰", border)
+    buf.set(x + w - 1, y + h - 1, "╯", border)
+    let _ = put(
+        buf,
+        x + 2,
+        y,
+        " ${title} ",
+        Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.popup")).bold(),
+    )
+}
+
+fun draw_picker(ed: Ed, buf: Buffer) {
+    let t = ed.theme
+    let w = min(buf.w - 4, 90)
+    let h = min(buf.h - 4, 22)
+    let x = (buf.w - w) / 2
+    let y = 2
+    ed.box_x = x
+    ed.box_y = y
+    ed.box_w = w
+    ed.box_h = h
+    let titles = {
+        "files": "Open file",
+        "commands": "Commands",
+        "buffers": "Open files",
+        "themes": "Theme",
+        "languages": "Language",
+        "grep": "Matches",
+    }
+    let title = titles.get(ed.picker_kind).unwrap_or("Pick")
+    draw_box(ed, buf, x, y, w, h, "${title}  ${len(ed.picker_shown)}/${len(ed.picker_items)}")
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
+    var cx = put(buf, x + 2, y + 1, "› " + ed.prompt, st.bold())
+    buf.set(min(cx, x + w - 2), y + 1, " ", Style.new().bg(t.c("ui.cursor")))
+    let rows = h - 3
+    if ed.picker_sel < ed.picker_top {
+        ed.picker_top = ed.picker_sel
+    }
+    if ed.picker_sel >= ed.picker_top + rows {
+        ed.picker_top = ed.picker_sel - rows + 1
+    }
+    for i in range(rows) {
+        let k = ed.picker_top + i
+        if k >= len(ed.picker_shown) {
+            break
+        }
+        let item = ed.picker_shown[k]
+        let sel = k == ed.picker_sel
+        let rst = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup.selected")).bold() if sel else st
+        fill_row(buf, x + 1, x + w - 1, y + 2 + i, rst)
+        let two = item.index_of("  ")
+        if two > 0 {
+            let head = item.substring(0, two)
+            let tail = item.substring(two, item.length())
+            let hx = put(buf, x + 2, y + 2 + i, truncate(head, w - 4), rst)
+            let _ = put(
+                buf,
+                hx,
+                y + 2 + i,
+                truncate(tail, max(0, x + w - 2 - hx)),
+                Style.new().fg(t.c("comment")).bg(rst.bg),
+            )
+        } else {
+            let _ = put(buf, x + 2, y + 2 + i, truncate(item, w - 4), rst)
+        }
+    }
+}
+
+fun draw_completions(ed: Ed, buf: Buffer) {
+    let t = ed.theme
+    let opts = ed.complete(ed.prompt)
+    let n = min(len(opts), 8)
+    if n == 0 {
+        return
+    }
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
+    for i in range(n) {
+        let y = buf.h - 2 - n + i
+        fill_row(
+            buf,
+            0,
+            40,
+            y,
+            st if i > 0 else Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup.selected")),
+        )
+        let _ = put(
+            buf,
+            1,
+            y,
+            opts[i],
+            st if i > 0 else Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup.selected")).bold(),
+        )
+    }
+}
+
+fun draw_panel(ed: Ed, buf: Buffer, y0: int, h: int) {
+    let t = ed.theme
+    let head = Style.new().fg(t.c("ui.bar.fg")).bg(t.c("ui.bar")).bold()
+    fill_row(buf, 0, buf.w, y0, head)
+    let _ = put(buf, 1, y0, "${ed.panel_title}  (Ctrl+L hides)", head)
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.sidebar"))
+    let start = max(0, len(ed.panel) - (h - 1))
+    for i in range(h - 1) {
+        fill_row(buf, 0, buf.w, y0 + 1 + i, st)
+        let k = start + i
+        if k < len(ed.panel) {
+            let _ = put(buf, 1, y0 + 1 + i, truncate(ed.panel[k], buf.w - 2), st)
+        }
+    }
+}
+
+fun describe(name: str) -> str {
+    for (n, d) in COMMANDS {
+        if n == name {
+            return d
+        }
+    }
+    return name.replace("_", " ")
+}
+
+fun help_lines(ed: Ed) -> list[str] {
+    let out: list[str] = [
+        "dusk: a modal editor that also works like a normal one",
+        "",
+        "Everyday keys work in every mode: Ctrl+S save, Ctrl+Q quit, Ctrl+Z undo, Ctrl+Y redo,",
+        "Ctrl+P open a file, Ctrl+F search, Ctrl+K command palette, Ctrl+B file tree, F1 this help.",
+        "Press i to type, Esc to go back to normal mode, : for commands (:w, :q, :%s/a/b/g, :theme).",
+        "",
+        "MOUSE",
+        "  click            place the cursor (or open a file / switch tabs)",
+        "  drag             select text; drag in the line numbers to select lines",
+        "  double-click     select a word",
+        "  wheel            scroll the file, the file tree, or a list",
+        "  middle-click     paste",
+        "",
+        "OPERATORS (normal mode)",
+        "  d c y gc + motion   delete, change, copy, comment: dw, ciw, yi(, c$, d3j, gcap",
+        "  dd cc yy gcc        the whole line; a count repeats (3dd)",
+        "  f t F T + char      to or till a character (dt;)",
+        "  i/a + w ( [ { < \" ' `  inside or around a word, brackets, or quotes",
+        "",
+    ]
+    for mode in ["global", "normal", "insert", "visual"] {
+        out.push(mode.to_upper() + " KEYS" + (" (every mode)" if mode == "global" else ""))
+        match ed.keys.get(mode) {
+            case Some(tbl) {
+                for (k, v) in tbl {
+                    out.push("  ${k}${" " * max(1, 18 - k.length())}${describe(v)}")
+                }
+            }
+            case None {}
+        }
+        out.push("")
+    }
+    out.push("COMMAND LINE")
+    for line in [
+        ":w [name]  save      :q  close or quit   :wq  save and quit   :q!  quit without saving",
+        ":e path  open a file   :bn :bp :bd  buffers   :ls  open files   :42  go to line 42",
+        ":s/old/new/g  replace in the line   :%s/old/new/g  everywhere   :'<,'>s  in the selection",
+        ":sort   :theme [name]   :lang [name]   :set nu|rnu|nonu|ts=2|expandtab|noautopairs",
+        ":grep text  search the whole project   :config  edit the config   :plugins  run a plugin   :!cmd  run a shell command",
+    ] {
+        out.push("  " + line)
+    }
+    out.push("")
+    out.push("PLUGINS AND CONFIG")
+    out.push("  F12 or :config opens ~/.config/dusk/config.toml with every option documented.")
+    out.push("  Bind keys per mode, add languages, override colors, and add [[plugin]] commands")
+    out.push("  that send the buffer, selection, or line to any program and use what it prints.")
+    out.push("")
+    out.push("LANGUAGES")
+    var names = ""
+    for l in ed.langs {
+        names += l.name + " "
+    }
+    out.push("  " + names)
+    return out
+}
+
+fun draw_help(ed: Ed, buf: Buffer, h: int) {
+    let t = ed.theme
+    let w = min(buf.w - 2, 100)
+    let x = (buf.w - w) / 2
+    draw_box(ed, buf, x, 1, w, h, "Help  (j/k or wheel to scroll, Esc to close)")
+    let lines = help_lines(ed)
+    ed.help_top = min(ed.help_top, max(0, len(lines) - (h - 2)))
+    let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
+    let head = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.popup")).bold()
+    for i in range(h - 2) {
+        let k = ed.help_top + i
+        if k >= len(lines) {
+            break
+        }
+        let line = lines[k]
+        let is_head = line != "" and not line.starts_with(" ") and line == line.to_upper()
+        let _ = put(buf, x + 2, 2 + i, truncate(line, w - 4), head if is_head or k == 0 else st)
+    }
+}

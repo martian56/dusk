@@ -1,0 +1,6 @@
+*.exe
+*.o
+*.pdb
+target/
+rv.lock
+.dusk.toml

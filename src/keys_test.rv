@@ -1,0 +1,29 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true
+from "./keys" import parse_script, normalize_binding, key_name
+from "./files" import fuzzy_score, fuzzy_filter
+
+fun test_normalize_bindings() {
+    assert_eq_str(normalize_binding("gg"), "g g")
+    assert_eq_str(normalize_binding("space w"), "space w")
+    assert_eq_str(normalize_binding("ctrl+s"), "ctrl+s")
+    assert_eq_str(normalize_binding("f12"), "f12")
+    assert_eq_str(normalize_binding("esc"), "esc")
+}
+
+fun test_script_notation() {
+    let evs = parse_script("ab<esc><c-s><s-up><click:3,4><wheeldown:1,2><lt>")
+    assert_eq_int(len(evs), 8)
+    assert_eq_str(key_name(evs[2].key), "esc")
+    assert_eq_str(key_name(evs[3].key), "ctrl+s")
+    assert_eq_str(key_name(evs[4].key), "shift+up")
+    assert_true(evs[5].is_mouse)
+    assert_eq_int(evs[5].mouse.x, 3)
+    assert_eq_str(key_name(evs[7].key), "<")
+}
+
+fun test_fuzzy_prefers_file_names() {
+    assert_eq_int(fuzzy_score("xyz", "src/main.rv"), -1)
+    let best = fuzzy_filter("edit", ["docs/credits.md", "src/editor.rv", "src/view.rv"], 3)
+    assert_eq_str(best[0], "src/editor.rv")
+    assert_eq_int(len(best), 2)
+}

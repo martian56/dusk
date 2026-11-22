@@ -1,0 +1,3034 @@
+// The editor: state, commands, and input handling. Rendering is in view.rv.
+
+from std.fs import exists, is_dir, write, create_dir_all
+from std.time import now_millis
+from std.process import run_with_input
+from "github.com/martian56/perch/keys" import Key, MouseEvent
+from "./doc" import Doc, open_doc, clen, csub
+from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
+from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
+from "./theme" import Theme, make_theme, theme_names
+from "./keys" import key_name, default_keys, normalize_binding
+from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
+
+class Jump {
+    path: str
+    row: int
+    col: int
+}
+
+class Ed {
+    docs: list[Doc]
+    cur: int
+    langs: list[Lang]
+    cfg: Config
+    theme: Theme
+    keys: dict[str, dict[str, str]]
+    mode: str = "normal"
+    pending: str = ""
+    pending_cmd: str = ""
+    last_find: str = ""
+    // A selection made with Shift from insert mode: typing replaces it.
+    shift_sel: bool = false
+    last_find_ch: str = ""
+    pending_keys: list[Key] = []
+    count: int = 0
+    op: str = ""
+    op_count: int = 0
+    message: str = ""
+    error: bool = false
+    register: str = ""
+    reg_lines: bool = false
+    anchor_row: int = 0
+    anchor_col: int = 0
+    search: str = ""
+    search_back: bool = false
+    search_origin: Jump = Jump("", 0, 0)
+    prompt: str = ""
+    prompt_kind: str = ""
+    prompt_mode_before: str = "normal"
+    history: list[str] = []
+    hist_at: int = 0
+    picker_kind: str = ""
+    picker_items: list[str] = []
+    picker_shown: list[str] = []
+    picker_sel: int = 0
+    picker_top: int = 0
+    file_cache: list[str] = []
+    show_tree: bool = true
+    tree: list[TreeItem] = []
+    tree_open: dict[str, bool] = {}
+    tree_sel: int = 0
+    tree_top: int = 0
+    panel: list[str] = []
+    show_panel: bool = false
+    panel_title: str = ""
+    help_top: int = 0
+    confirm: str = ""
+    jumps: list[Jump] = []
+    last_change: list[Key] = []
+    recording: list[Key] = []
+    is_recording: bool = false
+    replaying: bool = false
+    quit: bool = false
+    // Layout from the last frame, for mapping mouse positions.
+    w: int = 80
+    h: int = 24
+    text_x: int = 0
+    text_y: int = 1
+    text_w: int = 80
+    text_h: int = 20
+    gutter_w: int = 0
+    side_w: int = 0
+    tab_hits: list[(int, int, int)] = []
+    box_x: int = 0
+    box_y: int = 0
+    box_w: int = 0
+    box_h: int = 0
+    last_click: int = 0
+    last_click_x: int = -1
+    last_click_y: int = -1
+    dragging: bool = false
+}
+
+let CHANGES = [
+    "delete_char",
+    "delete_char_before",
+    "delete_to_end",
+    "change_to_end",
+    "substitute_char",
+    "change_line",
+    "paste_after",
+    "paste_before",
+    "join_lines",
+    "indent",
+    "dedent",
+    "toggle_case",
+    "toggle_comment",
+    "insert_before",
+    "insert_after",
+    "insert_line_start",
+    "insert_line_end",
+    "open_below",
+    "open_above",
+]
+
+fun new_editor(paths: list[str]) -> Ed {
+    let cfg = load_config()
+    let langs = builtin_langs()
+    for l in cfg.langs {
+        langs.push(l)
+    }
+    let theme = make_theme(cfg.theme)
+    for (k, v) in cfg.colors {
+        let _ = theme.set(k, v)
+    }
+    let keys = default_keys()
+    for (mode, table) in cfg.keys {
+        if not keys.has(mode) {
+            let fresh: dict[str, str] = {}
+            keys.set(mode, fresh)
+        }
+        for (k, v) in table {
+            keys.get(mode).unwrap().set(normalize_binding(k), v)
+        }
+    }
+    for p in cfg.plugins {
+        if p.key != "" {
+            keys.get("global").unwrap().set(normalize_binding(p.key), "plugin.${p.name}")
+        }
+    }
+    let docs: list[Doc] = []
+    let ed = Ed(docs: docs, cur: 0, langs: langs, cfg: cfg, theme: theme, keys: keys)
+    ed.show_tree = cfg.sidebar
+    for p in paths {
+        if is_dir(p) {
+            continue
+        }
+        ed.open(p)
+    }
+    if len(ed.docs) == 0 {
+        ed.docs.push(open_doc("", -1))
+    }
+    ed.cur = 0
+    ed.refresh_tree()
+    if len(cfg.errors) > 0 {
+        ed.fail(cfg.errors[0])
+    } else if len(cfg.files) == 0 {
+        ed.say("dusk: F1 for help, Ctrl+P to open a file, :q to quit")
+    }
+    for p in cfg.plugins {
+        if p.on == "open" {
+            ed.run_plugin(p)
+        }
+    }
+    return ed
+}
+
+fun cls(ch: str) -> int {
+    if ch == "" or ch == " " or ch == "\t" {
+        return 0
+    }
+    if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch.length() > 1 {
+        return 1
+    }
+    return 2
+}
+
+fun is_word_char(ch: str) -> bool = cls(ch) == 1
+
+let PAIRS = {"(": ")", "[": "]", "{": "}", "\"": "\"", "'": "'", "`": "`"}
+let CLOSERS = [")", "]", "}"]
+
+impl Ed {
+    fun doc(self) -> Doc = self.docs[self.cur]
+
+    fun lang(self) -> Lang {
+        let d = self.doc()
+        return self.langs[d.lang] if d.lang >= 0 else plain_lang()
+    }
+
+    fun say(self, msg: str) {
+        self.message = msg
+        self.error = false
+    }
+
+    fun fail(self, msg: str) {
+        self.message = msg
+        self.error = true
+    }
+
+    fun ch(self, r: int, c: int) -> str {
+        let d = self.doc()
+        if r < 0 or r >= len(d.lines) {
+            return ""
+        }
+        let cs = d.lines[r].chars()
+        return cs[c] if c >= 0 and c < len(cs) else ""
+    }
+
+    fun open(self, path: str) {
+        let p = path.replace("\\", "/")
+        for i in range(len(self.docs)) {
+            if self.docs[i].path == p {
+                self.cur = i
+                return
+            }
+        }
+        let d = open_doc(p, lang_for_path(self.langs, p))
+        // Replace a single untouched empty buffer.
+        if len(self.docs) == 1 and self.docs[0].path == "" and not self.docs[0].dirty {
+            self.docs[0] = d
+            self.cur = 0
+        } else {
+            self.docs.push(d)
+            self.cur = len(self.docs) - 1
+        }
+        if not exists(p) {
+            self.say("new file ${p}")
+        }
+        for pl in self.cfg.plugins {
+            if pl.on == "open" and len(self.docs) > 1 {
+                self.run_plugin(pl)
+            }
+        }
+    }
+
+    fun push_jump(self) {
+        let d = self.doc()
+        self.jumps.push(Jump(d.path, d.row, d.col))
+        if len(self.jumps) > 100 {
+            let _ = self.jumps.remove_at(0)
+        }
+    }
+
+    fun save_doc(self, d: Doc) -> bool {
+        return match d.save() {
+            case Ok(_) {
+                self.say("wrote ${d.path} (${len(d.lines)} lines)")
+                true
+            }
+            case Err(e) {
+                self.fail("save failed: ${e}")
+                false
+            }
+        }
+    }
+
+    fun save(self) {
+        let d = self.doc()
+        if d.path == "" {
+            self.start_prompt("save_as", "")
+            return
+        }
+        if self.save_doc(d) {
+            let msg = self.message
+            for p in self.cfg.plugins {
+                if p.on == "save" {
+                    self.run_plugin(p)
+                }
+            }
+            if not self.error and self.message == "" {
+                self.say(msg)
+            }
+        }
+    }
+
+    fun dirty_count(self) -> int = self.docs.count(d => d.dirty)
+
+    fun request_quit(self, force: bool) {
+        if force or self.dirty_count() == 0 {
+            self.quit = true
+            return
+        }
+        self.confirm = "quit"
+        self.mode = "confirm"
+        self.fail(
+            "${self.dirty_count()} unsaved file(s): s save all and quit, q quit anyway, esc cancel",
+        )
+    }
+
+    fun close_buffer(self, force: bool) {
+        let d = self.doc()
+        if d.dirty and not force {
+            self.confirm = "close"
+            self.mode = "confirm"
+            self.fail(
+                "${d.path if d.path != "" else "[new]"} has changes: s save and close, q discard, esc cancel",
+            )
+            return
+        }
+        let _ = self.docs.remove_at(self.cur)
+        if len(self.docs) == 0 {
+            self.docs.push(open_doc("", -1))
+        }
+        self.cur = min(self.cur, len(self.docs) - 1)
+    }
+
+    fun refresh_tree(self) {
+        self.tree = build_tree(".", self.tree_open)
+        self.tree_sel = min(self.tree_sel, max(0, len(self.tree) - 1))
+    }
+
+    fun tree_activate(self, i: int) {
+        if i < 0 or i >= len(self.tree) {
+            return
+        }
+        let it = self.tree[i]
+        self.tree_sel = i
+        if it.dir {
+            self.tree_open.set(it.path, not it.open)
+            self.refresh_tree()
+        } else {
+            self.push_jump()
+            self.open(it.path)
+            if self.mode == "tree" {
+                self.mode = "normal"
+            }
+        }
+    }
+
+    fun line_max(self, r: int) -> int {
+        // Normal mode cannot rest past the last character.
+        let n = self.doc().line_len(r)
+        if self.mode == "insert" or n == 0 {
+            return n
+        }
+        return n - 1
+    }
+
+    fun go(self, r: int, c: int) {
+        let d = self.doc()
+        d.row = max(0, min(r, len(d.lines) - 1))
+        d.col = max(0, min(c, self.line_max(d.row)))
+        d.want = d.col
+    }
+
+    fun go_vert(self, r: int) {
+        let d = self.doc()
+        d.row = max(0, min(r, len(d.lines) - 1))
+        d.col = max(0, min(d.want, self.line_max(d.row)))
+    }
+
+    fun first_char(self, r: int) -> int {
+        let cs = self.doc().lines[r].chars()
+        var i = 0
+        while i < len(cs) and (cs[i] == " " or cs[i] == "\t") {
+            i += 1
+        }
+        return i
+    }
+
+    fun next_pos(self, r: int, c: int) -> (int, int, bool) {
+        let d = self.doc()
+        if c < d.line_len(r) {
+            return (r, c + 1, true)
+        }
+        if r + 1 < len(d.lines) {
+            return (r + 1, 0, true)
+        }
+        return (r, c, false)
+    }
+
+    fun prev_pos(self, r: int, c: int) -> (int, int, bool) {
+        if c > 0 {
+            return (r, c - 1, true)
+        }
+        if r > 0 {
+            return (r - 1, self.doc().line_len(r - 1), true)
+        }
+        return (r, c, false)
+    }
+
+    fun big_cls(self, ch: str, big: bool) -> int {
+        let k = cls(ch)
+        return 1 if big and k == 2 else k
+    }
+
+    fun word_next(self, r0: int, c0: int, big: bool) -> (int, int) {
+        var r = r0
+        var c = c0
+        let start = self.big_cls(self.ch(r, c), big)
+        if start != 0 {
+            while self.big_cls(self.ch(r, c), big) == start {
+                let (nr, nc, ok) = self.next_pos(r, c)
+                if not ok {
+                    return (r, c)
+                }
+                if nr != r {
+                    r = nr
+                    c = nc
+                    break
+                }
+                c = nc
+            }
+        }
+        while self.ch(r, c) == "" or cls(self.ch(r, c)) == 0 {
+            if self.ch(r, c) == "" and c == 0 and self.doc().line_len(r) == 0 and (r != r0) {
+                return (r, c)
+            }
+            let (nr, nc, ok) = self.next_pos(r, c)
+            if not ok {
+                return (r, c)
+            }
+            r = nr
+            c = nc
+        }
+        return (r, c)
+    }
+
+    fun word_end(self, r0: int, c0: int, big: bool) -> (int, int) {
+        var (r, c, ok) = self.next_pos(r0, c0)
+        while ok and cls(self.ch(r, c)) == 0 {
+            let (nr, nc, k) = self.next_pos(r, c)
+            r = nr
+            c = nc
+            ok = k
+        }
+        let k = self.big_cls(self.ch(r, c), big)
+        while true {
+            let (nr, nc, more) = self.next_pos(r, c)
+            if not more or nr != r or self.big_cls(self.ch(nr, nc), big) != k {
+                break
+            }
+            r = nr
+            c = nc
+        }
+        return (r, c)
+    }
+
+    fun word_prev(self, r0: int, c0: int, big: bool) -> (int, int) {
+        var (r, c, ok) = self.prev_pos(r0, c0)
+        while ok and cls(self.ch(r, c)) == 0 and not (c == 0 and self.doc().line_len(r) == 0) {
+            let (pr, pc, k) = self.prev_pos(r, c)
+            r = pr
+            c = pc
+            ok = k
+        }
+        let k = self.big_cls(self.ch(r, c), big)
+        while c > 0 and self.big_cls(self.ch(r, c - 1), big) == k {
+            c -= 1
+        }
+        return (r, c)
+    }
+
+    fun word_bounds(self, r: int, c: int) -> (int, int) {
+        let k = cls(self.ch(r, c))
+        var a = c
+        var b = c
+        while a > 0 and cls(self.ch(r, a - 1)) == k {
+            a -= 1
+        }
+        while b < self.doc().line_len(r) and cls(self.ch(r, b)) == k {
+            b += 1
+        }
+        return (a, b)
+    }
+
+    fun word_at_cursor(self) -> str {
+        let d = self.doc()
+        if not is_word_char(self.ch(d.row, d.col)) {
+            return ""
+        }
+        let (a, b) = self.word_bounds(d.row, d.col)
+        return csub(d.lines[d.row], a, b)
+    }
+
+    fun match_bracket_pos(self) -> Option[(int, int)] {
+        let d = self.doc()
+        let opens = "([{"
+        let closes = ")]}"
+        var c = d.col
+        let cs = d.lines[d.row].chars()
+        while c < len(cs) and not (opens.contains(cs[c]) or closes.contains(cs[c])) {
+            c += 1
+        }
+        if c >= len(cs) {
+            return None
+        }
+        let b = cs[c]
+        let forward = opens.contains(b)
+        let mate = closes.char_at(opens.index_of(b)) if forward else opens.char_at(closes.index_of(b))
+        var depth = 0
+        var r = d.row
+        var k = c
+        while true {
+            let x = self.ch(r, k)
+            if x == b {
+                depth += 1
+            } else if x == mate {
+                depth -= 1
+                if depth == 0 {
+                    return Some((r, k))
+                }
+            }
+            let (nr, nc, ok) = self.next_pos(r, k) if forward else self.prev_pos(r, k)
+            if not ok {
+                return None
+            }
+            r = nr
+            k = nc
+        }
+        return None
+    }
+
+    fun para(self, dir: int) -> int {
+        let d = self.doc()
+        var r = d.row + dir
+        while r > 0 and r < len(d.lines) - 1 and d.lines[r].trim() != "" {
+            r += dir
+        }
+        return max(0, min(r, len(d.lines) - 1))
+    }
+
+    fun scroll_into_view(self) {
+        let d = self.doc()
+        let off = min(self.cfg.scroll_off, max(0, (self.text_h - 1) / 2))
+        if d.row < d.top + off {
+            d.top = max(0, d.row - off)
+        }
+        if d.row >= d.top + self.text_h - off {
+            d.top = d.row - self.text_h + off + 1
+        }
+        d.top = max(0, min(d.top, max(0, len(d.lines) - 1)))
+    }
+
+    fun indent_unit(self) -> str = " " * self.cfg.tab_width if self.cfg.expand_tabs else "\t"
+
+    fun yank(self, text: str, lines: bool) {
+        self.register = text
+        self.reg_lines = lines
+        if self.cfg.clipboard != "" and not self.replaying {
+            match run_with_input(self.cfg.clipboard, [], text) {
+                case Ok(_) {}
+                case Err(_) {}
+            }
+        }
+    }
+
+    fun insert_text(self, text: str) {
+        let d = self.doc()
+        let (r, c) = d.insert_at(d.row, d.col, text)
+        d.row = r
+        d.col = c
+        d.want = c
+    }
+
+    fun type_char(self, c: str) {
+        let d = self.doc()
+        let next = self.ch(d.row, d.col)
+        if self.cfg.auto_pairs {
+            if c in CLOSERS or c == "\"" or c == "'" or c == "`" {
+                if next == c {
+                    d.col += 1
+                    d.want = d.col
+                    return
+                }
+            }
+            match PAIRS.get(c) {
+                case Some(close) {
+                    let prev = self.ch(d.row, d.col - 1)
+                    let quote = c == "\"" or c == "'" or c == "`"
+                    let free = next == "" or next == " " or next in CLOSERS
+                    if free and not (quote and is_word_char(prev)) {
+                        self.insert_text(c + close)
+                        d.col -= 1
+                        d.want = d.col
+                        return
+                    }
+                }
+                case None {}
+            }
+        }
+        self.insert_text(c)
+    }
+
+    fun newline(self) {
+        let d = self.doc()
+        let indent = d.indent_of(d.row)
+        let before = self.ch(d.row, d.col - 1)
+        let after = self.ch(d.row, d.col)
+        let opens = before != "" and self.lang().indent_after.contains(before)
+        if opens {
+            self.insert_text("\n" + indent + self.indent_unit())
+            if after in CLOSERS {
+                let (r, c) = (d.row, d.col)
+                self.insert_text("\n" + indent)
+                d.row = r
+                d.col = c
+                d.want = c
+            }
+            return
+        }
+        self.insert_text("\n" + indent)
+    }
+
+    fun backspace(self) {
+        let d = self.doc()
+        if d.col == 0 and d.row == 0 {
+            return
+        }
+        if d.col == 0 {
+            let prev_len = d.line_len(d.row - 1)
+            let _ = d.delete_range(d.row - 1, prev_len, d.row, 0)
+            d.row -= 1
+            d.col = prev_len
+            d.want = d.col
+            return
+        }
+        let before = self.ch(d.row, d.col - 1)
+        let after = self.ch(d.row, d.col)
+        if self.cfg.auto_pairs and PAIRS.get(before).unwrap_or("\0") == after {
+            let _ = d.delete_range(d.row, d.col - 1, d.row, d.col + 1)
+            d.col -= 1
+            d.want = d.col
+            return
+        }
+        // Remove one indent level at once inside leading spaces.
+        let lead = csub(d.lines[d.row], 0, d.col)
+        let unit = self.cfg.tab_width
+        if self.cfg.expand_tabs and lead.trim() == "" and d.col >= unit and d.col % unit == 0 {
+            let _ = d.delete_range(d.row, d.col - unit, d.row, d.col)
+            d.col -= unit
+            d.want = d.col
+            return
+        }
+        let _ = d.delete_range(d.row, d.col - 1, d.row, d.col)
+        d.col -= 1
+        d.want = d.col
+    }
+
+    fun sel_range(self) -> (int, int, int, int) {
+        let d = self.doc()
+        var r1 = self.anchor_row
+        var c1 = self.anchor_col
+        var r2 = d.row
+        var c2 = d.col
+        if r2 < r1 or (r2 == r1 and c2 < c1) {
+            let (tr, tc) = (r1, c1)
+            r1 = r2
+            c1 = c2
+            r2 = tr
+            c2 = tc
+        }
+        if self.mode == "vline" {
+            return (r1, 0, r2, d.line_len(r2))
+        }
+        // A Shift selection ends before the cursor, as in other editors;
+        // a vim visual selection includes the character under it.
+        let end = c2 if self.shift_sel else c2 + 1
+        return (r1, c1, r2, min(end, d.line_len(r2)))
+    }
+
+    fun selection_text(self) -> str {
+        let (r1, c1, r2, c2) = self.sel_range()
+        let t = self.doc().text_range(r1, c1, r2, c2)
+        return t + "\n" if self.mode == "vline" else t
+    }
+
+    fun delete_selection(self) -> str {
+        let d = self.doc()
+        let (r1, c1, r2, c2) = self.sel_range()
+        d.checkpoint()
+        if self.mode == "vline" {
+            let t = d.delete_lines(r1, r2)
+            self.go(r1, self.first_char(min(r1, len(d.lines) - 1)))
+            return t
+        }
+        let t = d.delete_range(r1, c1, r2, c2)
+        d.row = r1
+        d.col = c1
+        return t
+    }
+
+    fun shift_lines(self, r1: int, r2: int, dir: int) {
+        let d = self.doc()
+        let unit = self.indent_unit()
+        for r in range(r1, r2 + 1) {
+            let line = d.lines[r]
+            if dir > 0 {
+                if line != "" {
+                    d.lines[r] = unit + line
+                }
+            } else {
+                var k = 0
+                let cs = line.chars()
+                while k < len(cs) and k < self.cfg.tab_width and cs[k] == " " {
+                    k += 1
+                }
+                if k == 0 and len(cs) > 0 and cs[0] == "\t" {
+                    k = 1
+                }
+                d.lines[r] = csub(line, k, len(cs))
+            }
+        }
+        d.touched(r1)
+    }
+
+    fun comment_lines(self, r1: int, r2: int) {
+        let d = self.doc()
+        let l = self.lang()
+        var open = l.line_comment
+        var close = ""
+        if open == "" {
+            if l.block_start == "" {
+                self.fail("no comment syntax for ${l.name}")
+                return
+            }
+            open = l.block_start
+            close = l.block_end
+        }
+        var all = true
+        var indent = 1000000
+        for r in range(r1, r2 + 1) {
+            let t = d.lines[r].trim()
+            if t == "" {
+                continue
+            }
+            indent = min(indent, self.first_char(r))
+            if not t.starts_with(open) {
+                all = false
+            }
+        }
+        for r in range(r1, r2 + 1) {
+            let line = d.lines[r]
+            if line.trim() == "" {
+                continue
+            }
+            if all {
+                let f = self.first_char(r)
+                var rest = csub(line, f + clen(open), clen(line))
+                if rest.starts_with(" ") {
+                    rest = csub(rest, 1, clen(rest))
+                }
+                if close != "" and rest.ends_with(close) {
+                    rest = csub(rest, 0, clen(rest) - clen(close)).trim_end()
+                }
+                d.lines[r] = csub(line, 0, f) + rest
+            } else {
+                let tail = " " + close if close != "" else ""
+                d.lines[r] = csub(line, 0, indent) + open + " " + csub(line, indent, clen(line)) + tail
+            }
+        }
+        d.touched(r1)
+    }
+
+    fun paste(self, after: bool) {
+        let d = self.doc()
+        if self.register == "" {
+            return
+        }
+        d.checkpoint()
+        if self.reg_lines {
+            let body = self.register.substring(0, self.register.length() - 1) if self.register.ends_with("\n") else self.register
+            let at = d.row + 1 if after else d.row
+            if at >= len(d.lines) {
+                let last = len(d.lines) - 1
+                let _ = d.insert_at(last, d.line_len(last), "\n" + body)
+            } else {
+                let _ = d.insert_at(at, 0, body + "\n")
+            }
+            self.go(at, self.first_char(at))
+            return
+        }
+        let c = min(d.col + 1, d.line_len(d.row)) if after and d.line_len(d.row) > 0 else d.col
+        let (r, nc) = d.insert_at(d.row, c, self.register)
+        self.go(r, max(0, nc - 1))
+    }
+
+    fun find(self, pat: str, from_r: int, from_c: int, back: bool) -> Option[(int, int)] {
+        if pat == "" {
+            return None
+        }
+        let d = self.doc()
+        let nocase = pat == pat.to_lower()
+        let p = pat.to_lower() if nocase else pat
+        let n = len(d.lines)
+        for step in range(n + 1) {
+            let r = ((from_r - step) % n + n) % n if back else (from_r + step) % n
+            let line = d.lines[r].to_lower() if nocase else d.lines[r]
+            let cs = line.chars()
+            var hits: list[int] = []
+            var i = 0
+            let pc = p.chars()
+            while i + len(pc) <= len(cs) {
+                var ok = true
+                var j = 0
+                while j < len(pc) and ok {
+                    if cs[i + j] != pc[j] {
+                        ok = false
+                    }
+                    j += 1
+                }
+                if ok {
+                    hits.push(i)
+                }
+                i += 1
+            }
+            if back {
+                var k = len(hits) - 1
+                while k >= 0 {
+                    if step > 0 or hits[k] < from_c {
+                        return Some((r, hits[k]))
+                    }
+                    k -= 1
+                }
+            } else {
+                for h in hits {
+                    if step > 0 or h > from_c {
+                        return Some((r, h))
+                    }
+                }
+            }
+        }
+        return None
+    }
+
+    fun search_step(self, back: bool) {
+        let d = self.doc()
+        let dir = not back if self.search_back else back
+        match self.find(self.search, d.row, d.col, dir) {
+            case Some((r, c)) {
+                self.push_jump()
+                self.go(r, c)
+                self.say("/${self.search}")
+            }
+            case None { self.fail("not found: ${self.search}") }
+        }
+    }
+
+    fun replace_in(self, r1: int, r2: int, old: str, new: str, all: bool) -> int {
+        let d = self.doc()
+        var count = 0
+        d.checkpoint()
+        for r in range(r1, r2 + 1) {
+            let line = d.lines[r]
+            if not line.contains(old) {
+                continue
+            }
+            if all {
+                count += len(line.split(old)) - 1
+                d.lines[r] = line.replace(old, new)
+            } else {
+                let at = line.index_of(old)
+                d.lines[r] = line.substring(0, at) + new + line.substring(at + old.length(), line.length())
+                count += 1
+            }
+        }
+        d.touched(r1)
+        return count
+    }
+
+    fun rename_word(self, old: str, new: str) -> int {
+        let d = self.doc()
+        var count = 0
+        d.checkpoint()
+        for r in range(len(d.lines)) {
+            let cs = d.lines[r].chars()
+            let oc = old.chars()
+            var out = ""
+            var i = 0
+            var changed = false
+            while i < len(cs) {
+                var hit = i + len(oc) <= len(cs)
+                var j = 0
+                while hit and j < len(oc) {
+                    if cs[i + j] != oc[j] {
+                        hit = false
+                    }
+                    j += 1
+                }
+                if hit and (i == 0 or not is_word_char(cs[i - 1])) and (i + len(oc) >= len(cs) or not is_word_char(
+                    cs[i + len(oc)],
+                )) {
+                    out += new
+                    i += len(oc)
+                    count += 1
+                    changed = true
+                } else {
+                    out += cs[i]
+                    i += 1
+                }
+            }
+            if changed {
+                d.lines[r] = out
+            }
+        }
+        d.touched(0)
+        return count
+    }
+
+    fun goto_definition(self) {
+        let word = self.word_at_cursor()
+        if word == "" {
+            self.fail("no word under the cursor")
+            return
+        }
+        let intro = [
+            "fun",
+            "def",
+            "fn",
+            "func",
+            "function",
+            "class",
+            "struct",
+            "enum",
+            "trait",
+            "interface",
+            "type",
+            "let",
+            "var",
+            "const",
+            "impl",
+            "macro",
+            "module",
+            "defmodule",
+            "val",
+        ]
+        let looks = (line: str) => {
+            let t = line.trim()
+            for k in intro {
+                if t.starts_with(k + " ") or t.contains(" " + k + " ") {
+                    let rest = t.substring(t.index_of(k + " ") + k.length() + 1, t.length()).trim()
+                    if rest.starts_with(word) {
+                        let after = rest.substring(word.length(), rest.length())
+                        if after == "" or not is_word_char(after.char_at(0)) {
+                            return true
+                        }
+                    }
+                }
+            }
+            return false
+        }
+        let d = self.doc()
+        for r in range(len(d.lines)) {
+            if looks(d.lines[r]) {
+                self.push_jump()
+                self.go(r, self.first_char(r))
+                self.say("definition of ${word}")
+                return
+            }
+        }
+        let ext = d.path.substring(d.path.last_index_of(".") + 1, d.path.length())
+        if self.file_cache.is_empty() {
+            self.file_cache = all_files(".", 20000)
+        }
+        for f in self.file_cache {
+            if not f.ends_with("." + ext) or f == d.path {
+                continue
+            }
+            let other = open_doc(f, -1)
+            for r in range(len(other.lines)) {
+                if looks(other.lines[r]) {
+                    self.push_jump()
+                    self.open(f)
+                    self.go(r, self.first_char(r))
+                    self.say("definition of ${word} in ${f}")
+                    return
+                }
+            }
+        }
+        self.fail("no definition found for ${word}")
+    }
+
+    // Every line in the project containing `text`, as a picker of
+    // `path:line: text` entries; the search register is set so n works too.
+    fun grep(self, text: str) {
+        if text == "" {
+            return
+        }
+        self.search = text
+        let nocase = text == text.to_lower()
+        let needle = text.to_lower() if nocase else text
+        let hits: list[str] = []
+        for f in all_files(".", 20000) {
+            if len(hits) >= 2000 {
+                break
+            }
+            let d = open_doc(f, -1)
+            for r in range(len(d.lines)) {
+                let line = d.lines[r]
+                if line.length() > 2000 {
+                    continue
+                }
+                let hay = line.to_lower() if nocase else line
+                if hay.contains(needle) {
+                    hits.push("${f}:${r + 1}: ${line.trim()}")
+                }
+            }
+        }
+        if len(hits) == 0 {
+            self.fail("no matches for ${text}")
+            return
+        }
+        self.open_picker("grep", hits)
+        self.say("${len(hits)} matches for ${text}")
+    }
+
+    fun expand(self, s: str) -> str {
+        let d = self.doc()
+        let dir = d.path.substring(0, max(0, d.path.last_index_of("/")))
+        return s.replace("{file}", d.path).replace("{dir}", dir if dir != "" else ".").replace(
+            "{line}",
+            "${d.row + 1}",
+        ).replace("{col}", "${d.col + 1}").replace("{word}", self.word_at_cursor()).replace(
+            "{lang}",
+            self.lang().name,
+        )
+    }
+
+    fun run_plugin(self, p: Plugin) {
+        let d = self.doc()
+        let in_sel = self.mode == "visual" or self.mode == "vline"
+        var input = ""
+        if p.input == "buffer" {
+            input = d.text()
+        } else if p.input == "selection" {
+            input = self.selection_text() if in_sel else d.text()
+        } else if p.input == "line" {
+            input = d.lines[d.row] + "\n"
+        }
+        let args = p.args.map(a => self.expand(a))
+        match run_with_input(self.expand(p.command), args, input) {
+            case Err(e) { self.fail("${p.name}: ${e.message()}") }
+            case Ok(out) {
+                if out.code != 0 {
+                    let why = out.stderr.trim() if out.stderr.trim() != "" else out.stdout.trim()
+                    self.fail("${p.name} exited ${out.code}: ${why.split("\n")[0]}")
+                    self.panel_title = p.name
+                    self.panel = (out.stdout + out.stderr).split("\n")
+                    return
+                }
+                var text = out.stdout.replace("\r\n", "\n")
+                if p.output == "replace" {
+                    d.checkpoint()
+                    if p.input == "selection" and in_sel {
+                        if text.ends_with("\n") and self.mode != "vline" {
+                            text = text.substring(0, text.length() - 1)
+                        }
+                        let _ = self.delete_selection()
+                        if self.mode == "vline" {
+                            let _ = d.insert_at(d.row, 0, text)
+                        } else {
+                            self.insert_text(text)
+                        }
+                        self.mode = "normal"
+                    } else if p.input == "line" {
+                        d.lines[d.row] = text.trim_end()
+                        d.touched(d.row)
+                    } else {
+                        let row = d.row
+                        let col = d.col
+                        let _ = d.delete_range(0, 0, len(d.lines) - 1, d.line_len(len(d.lines) - 1))
+                        let body = text.substring(0, text.length() - 1) if text.ends_with("\n") else text
+                        let _ = d.insert_at(0, 0, body)
+                        d.row = row
+                        d.col = col
+                        d.clamp()
+                    }
+                    self.say("${p.name}: done")
+                } else if p.output == "insert" {
+                    d.checkpoint()
+                    self.insert_text(text.trim_end())
+                    self.say("${p.name}: inserted")
+                } else if p.output == "reload" {
+                    let row = d.row
+                    let col = d.col
+                    let fresh = open_doc(d.path, d.lang)
+                    if fresh.lines != d.lines {
+                        d.checkpoint()
+                        d.lines = fresh.lines
+                        d.row = row
+                        d.col = col
+                        d.clamp()
+                        d.touched(0)
+                        d.dirty = false
+                    }
+                    self.say("${p.name}: reloaded")
+                } else if p.output == "panel" {
+                    self.panel_title = p.name
+                    self.panel = text.split("\n")
+                    self.show_panel = true
+                    self.say("${p.name}: ${len(self.panel)} lines in the panel (Ctrl+L toggles it)")
+                } else if p.output == "message" {
+                    let first = text.trim().split("\n")[0]
+                    self.say("${p.name}: ${first}")
+                }
+            }
+        }
+    }
+
+    fun plugin_named(self, name: str) -> Option[Plugin] {
+        for p in self.cfg.plugins {
+            if p.name == name {
+                return Some(p)
+            }
+        }
+        return None
+    }
+
+    fun open_picker(self, kind: str, items: list[str]) {
+        self.picker_kind = kind
+        self.picker_items = items
+        self.prompt = ""
+        self.picker_sel = 0
+        self.picker_top = 0
+        self.mode = "picker"
+        self.filter_picker()
+    }
+
+    fun filter_picker(self) {
+        self.picker_shown = fuzzy_filter(self.prompt, self.picker_items, 500)
+        self.picker_sel = min(self.picker_sel, max(0, len(self.picker_shown) - 1))
+    }
+
+    fun picker_accept(self) {
+        if len(self.picker_shown) == 0 {
+            self.mode = "normal"
+            return
+        }
+        let item = self.picker_shown[self.picker_sel]
+        let kind = self.picker_kind
+        self.mode = "normal"
+        if kind == "files" {
+            self.push_jump()
+            self.open(item)
+        } else if kind == "buffers" {
+            let name = item.split("  ")[0]
+            for i in range(len(self.docs)) {
+                if self.doc_label(i) == name {
+                    self.cur = i
+                }
+            }
+        } else if kind == "commands" {
+            self.run(item.split("  ")[0], 1)
+        } else if kind == "grep" {
+            let parts = item.split(":")
+            if len(parts) >= 2 {
+                self.push_jump()
+                self.open(parts[0])
+                let r = parts[1].parse_int().unwrap_or(1) - 1
+                let col = self.doc().lines[max(0, min(r, len(self.doc().lines) - 1))].index_of(self.search)
+                self.go(r, max(0, col))
+            }
+        } else if kind == "themes" {
+            self.set_theme(item)
+        } else if kind == "languages" {
+            self.doc().lang = lang_named(self.langs, item)
+            self.doc().touched(0)
+            self.say("language: ${item}")
+        }
+    }
+
+    fun doc_label(self, i: int) -> str {
+        let d = self.docs[i]
+        return d.path if d.path != "" else "[new ${i + 1}]"
+    }
+
+    fun start_prompt(self, kind: str, initial: str) {
+        self.prompt_kind = kind
+        self.prompt = initial
+        self.mode = "prompt"
+    }
+
+    fun set_theme(self, name: str) {
+        self.theme = make_theme(name)
+        for (k, v) in self.cfg.colors {
+            let _ = self.theme.set(k, v)
+        }
+        self.say("theme: ${self.theme.name}")
+    }
+
+    fun command_names(self) -> list[str] {
+        let out: list[str] = []
+        for (name, desc) in COMMANDS {
+            out.push("${name}  ${desc}")
+        }
+        for p in self.cfg.plugins {
+            out.push("plugin.${p.name}  ${p.description if p.description != "" else p.command}")
+        }
+        return out
+    }
+
+    fun run(self, name: str, count: int) {
+        let d = self.doc()
+        let n = max(1, count)
+        let visual = self.mode == "visual" or self.mode == "vline"
+        if name.starts_with("plugin.") {
+            match self.plugin_named(name.substring(7, name.length())) {
+                case Some(p) { self.run_plugin(p) }
+                case None { self.fail("no plugin ${name}") }
+            }
+            return
+        }
+        if name == "left" {
+            self.go(d.row, d.col - n)
+        } else if name == "right" {
+            self.go(d.row, d.col + n)
+        } else if name == "up" {
+            self.go_vert(d.row - n)
+        } else if name == "down" {
+            self.go_vert(d.row + n)
+        } else if name == "word_next" or name == "bigword_next" {
+            for _ in range(n) {
+                let (r, c) = self.word_next(d.row, d.col, name == "bigword_next")
+                self.go(r, c)
+            }
+        } else if name == "word_prev" or name == "bigword_prev" {
+            for _ in range(n) {
+                let (r, c) = self.word_prev(d.row, d.col, name == "bigword_prev")
+                self.go(r, c)
+            }
+        } else if name == "word_end" {
+            for _ in range(n) {
+                let (r, c) = self.word_end(d.row, d.col, false)
+                self.go(r, c)
+            }
+        } else if name == "line_start" {
+            self.go(d.row, 0)
+        } else if name == "line_first_char" {
+            self.go(d.row, self.first_char(d.row))
+        } else if name == "line_end" {
+            self.go(d.row, d.line_len(d.row))
+            d.want = 1000000
+        } else if name == "next_line_start" {
+            self.go(d.row + n, self.first_char(min(d.row + n, len(d.lines) - 1)))
+        } else if name == "file_start" {
+            self.push_jump()
+            let r = count - 1 if count > 0 else 0
+            self.go(r, self.first_char(min(r, len(d.lines) - 1)))
+        } else if name == "file_end" {
+            self.push_jump()
+            let r = count - 1 if count > 0 else len(d.lines) - 1
+            self.go(r, self.first_char(min(r, len(d.lines) - 1)))
+        } else if name == "half_down" {
+            d.top = min(d.top + self.text_h / 2, max(0, len(d.lines) - 1))
+            self.go_vert(d.row + self.text_h / 2)
+        } else if name == "half_up" {
+            d.top = max(0, d.top - self.text_h / 2)
+            self.go_vert(d.row - self.text_h / 2)
+        } else if name == "page_down" {
+            d.top = min(d.top + self.text_h, max(0, len(d.lines) - 1))
+            self.go_vert(d.row + self.text_h)
+        } else if name == "page_up" {
+            d.top = max(0, d.top - self.text_h)
+            self.go_vert(d.row - self.text_h)
+        } else if name == "screen_top" {
+            self.go_vert(d.top)
+        } else if name == "screen_bottom" {
+            self.go_vert(d.top + self.text_h - 1)
+        } else if name == "screen_middle" {
+            self.go_vert(d.top + self.text_h / 2)
+        } else if name == "center_cursor" {
+            d.top = max(0, d.row - self.text_h / 2)
+        } else if name == "paragraph_next" {
+            self.go(self.para(1), 0)
+        } else if name == "paragraph_prev" {
+            self.go(self.para(-1), 0)
+        } else if name == "match_bracket" {
+            match self.match_bracket_pos() {
+                case Some((r, c)) { self.go(r, c) }
+                case None {}
+            }
+        } else if name == "insert_before" {
+            d.checkpoint()
+            self.mode = "insert"
+        } else if name == "insert_after" {
+            d.checkpoint()
+            self.mode = "insert"
+            self.go(d.row, d.col + (1 if d.line_len(d.row) > 0 else 0))
+        } else if name == "insert_line_start" {
+            d.checkpoint()
+            self.mode = "insert"
+            self.go(d.row, self.first_char(d.row))
+        } else if name == "insert_line_end" {
+            d.checkpoint()
+            self.mode = "insert"
+            self.go(d.row, d.line_len(d.row))
+        } else if name == "open_below" {
+            d.checkpoint()
+            self.mode = "insert"
+            self.go(d.row, d.line_len(d.row))
+            self.newline()
+        } else if name == "open_above" {
+            d.checkpoint()
+            self.mode = "insert"
+            let indent = d.indent_of(d.row)
+            let _ = d.insert_at(d.row, 0, indent + "\n")
+            self.go(d.row, clen(indent))
+        } else if name == "normal_mode" {
+            self.shift_sel = false
+            if self.mode == "insert" {
+                self.mode = "normal"
+                self.go(d.row, d.col - 1)
+            }
+            self.mode = "normal"
+            self.pending = ""
+            self.op = ""
+        } else if name == "visual" {
+            if self.mode == "visual" {
+                self.mode = "normal"
+            } else {
+                if not visual {
+                    self.anchor_row = d.row
+                    self.anchor_col = d.col
+                }
+                self.mode = "visual"
+            }
+        } else if name == "visual_line" {
+            if self.mode == "vline" {
+                self.mode = "normal"
+            } else {
+                if not visual {
+                    self.anchor_row = d.row
+                    self.anchor_col = d.col
+                }
+                self.mode = "vline"
+            }
+        } else if name == "select_all" {
+            self.anchor_row = 0
+            self.anchor_col = 0
+            self.mode = "vline"
+            self.go(len(d.lines) - 1, 0)
+        } else if name == "swap_anchor" {
+            let (r, c) = (self.anchor_row, self.anchor_col)
+            self.anchor_row = d.row
+            self.anchor_col = d.col
+            self.go(r, c)
+        } else if name == "command_mode" {
+            self.prompt_mode_before = self.mode
+            self.start_prompt("command", "'<,'>" if visual else "")
+            self.hist_at = len(self.history)
+        } else if name == "command_palette" {
+            self.open_picker("commands", self.command_names())
+        } else if name == "search_forward" or name == "search_backward" {
+            self.search_back = name == "search_backward"
+            self.search_origin = Jump(d.path, d.row, d.col)
+            self.start_prompt("search", "")
+        } else if name == "search_next" {
+            self.search_step(false)
+        } else if name == "search_prev" {
+            self.search_step(true)
+        } else if name == "search_word" or name == "search_word_back" {
+            let w = self.word_at_cursor()
+            if w != "" {
+                self.search = w
+                self.search_back = name == "search_word_back"
+                self.search_step(false)
+            }
+        } else if name == "search_selection" {
+            self.search = self.selection_text().split("\n")[0]
+            self.mode = "normal"
+            self.search_back = false
+            self.search_step(false)
+        } else if name.starts_with("select_") {
+            if not visual {
+                self.anchor_row = d.row
+                self.anchor_col = d.col
+                self.shift_sel = self.mode == "insert"
+                self.mode = "visual"
+            }
+            // Extending a selection may rest on the end of the line.
+            let saved = self.mode
+            self.mode = "insert"
+            if name == "select_left" {
+                self.go(d.row, d.col - 1)
+            } else if name == "select_right" {
+                self.go(d.row, d.col + 1)
+            } else if name == "select_up" {
+                self.go_vert(d.row - 1)
+            } else if name == "select_down" {
+                self.go_vert(d.row + 1)
+            } else if name == "select_line_start" {
+                self.go(d.row, self.first_char(d.row) if d.col != self.first_char(d.row) else 0)
+            } else if name == "select_line_end" {
+                self.go(d.row, d.line_len(d.row))
+            } else if name == "select_word_left" {
+                let (r, c) = self.word_prev(d.row, d.col, false)
+                self.go(r, c)
+            } else if name == "select_word_right" {
+                let (r, c) = self.word_next(d.row, d.col, false)
+                self.go(r, c)
+            }
+            self.mode = saved
+        } else if name == "move_line_up" or name == "move_line_down" {
+            let other = d.row - 1 if name == "move_line_up" else d.row + 1
+            if other >= 0 and other < len(d.lines) {
+                d.checkpoint()
+                var t = d.lines[d.row]
+                d.lines[d.row] = d.lines[other]
+                d.lines[other] = t
+                d.touched(min(d.row, other))
+                d.row = other
+            }
+        } else if name == "delete_word_after" {
+            let (r, c) = self.word_next(d.row, d.col, false)
+            d.checkpoint()
+            if r == d.row {
+                let _ = d.delete_range(d.row, d.col, d.row, c)
+            } else {
+                let _ = d.delete_range(d.row, d.col, d.row, d.line_len(d.row))
+            }
+        } else if name == "grep" {
+            self.start_prompt("grep", self.word_at_cursor())
+        } else if name == "goto_line" {
+            self.start_prompt("goto", "")
+        } else if name == "delete_char" {
+            if d.line_len(d.row) > 0 {
+                d.checkpoint()
+                var c2 = min(d.col + n, d.line_len(d.row))
+                self.yank(d.delete_range(d.row, d.col, d.row, c2), false)
+                self.go(d.row, d.col)
+            }
+        } else if name == "delete_char_before" {
+            if d.col > 0 {
+                d.checkpoint()
+                var c1 = max(0, d.col - n)
+                self.yank(d.delete_range(d.row, c1, d.row, d.col), false)
+                self.go(d.row, c1)
+            }
+        } else if name == "delete_to_end" {
+            d.checkpoint()
+            self.yank(d.delete_range(d.row, d.col, d.row, d.line_len(d.row)), false)
+            self.go(d.row, d.col)
+        } else if name == "change_to_end" {
+            d.checkpoint()
+            self.yank(d.delete_range(d.row, d.col, d.row, d.line_len(d.row)), false)
+            self.mode = "insert"
+        } else if name == "substitute_char" {
+            d.checkpoint()
+            if d.line_len(d.row) > 0 {
+                self.yank(d.delete_range(d.row, d.col, d.row, min(d.col + n, d.line_len(d.row))), false)
+            }
+            self.mode = "insert"
+        } else if name == "change_line" {
+            d.checkpoint()
+            let indent = d.indent_of(d.row)
+            self.yank(d.lines[d.row] + "\n", true)
+            d.lines[d.row] = indent
+            d.touched(d.row)
+            self.mode = "insert"
+            self.go(d.row, clen(indent))
+        } else if name == "delete_line" {
+            d.checkpoint()
+            var r2 = min(d.row + n - 1, len(d.lines) - 1)
+            self.yank(d.delete_lines(d.row, r2), true)
+            self.go(min(d.row, len(d.lines) - 1), self.first_char(min(d.row, len(d.lines) - 1)))
+        } else if name == "yank_line" {
+            var r2 = min(d.row + n - 1, len(d.lines) - 1)
+            var t = ""
+            for r in range(d.row, r2 + 1) {
+                t += d.lines[r] + "\n"
+            }
+            self.yank(t, true)
+            self.say("yanked ${r2 - d.row + 1} line(s)")
+        } else if name == "paste_after" {
+            if n > 1 {
+                let keep = self.register
+                self.register = keep * n if not self.reg_lines else keep * n
+                self.paste(true)
+                self.register = keep
+            } else {
+                self.paste(true)
+            }
+        } else if name == "paste_before" {
+            self.insert_text(self.register) if self.mode == "insert" else self.paste(false)
+        } else if name == "paste_over" {
+            let keep = self.register
+            let keep_lines = self.reg_lines
+            let was_line = self.mode == "vline"
+            let _ = self.delete_selection()
+            self.register = keep
+            self.reg_lines = keep_lines
+            self.mode = "normal"
+            self.paste(not was_line)
+        } else if name == "undo" {
+            if d.do_undo() {
+                self.say("undone (${len(d.undo)} left)")
+            } else {
+                self.say("nothing to undo")
+            }
+            self.mode = "normal" if self.mode != "insert" else "insert"
+        } else if name == "redo" {
+            self.say("redone") if d.do_redo() else self.say("nothing to redo")
+        } else if name == "join_lines" {
+            d.checkpoint()
+            var r1 = d.row
+            var r2 = min(d.row + max(1, n - 1), len(d.lines) - 1)
+            if visual {
+                let (a, ac, b, bc) = self.sel_range()
+                r1 = a
+                r2 = max(b, a + 1)
+                self.mode = "normal"
+            }
+            var c = d.col
+            for _ in range(r1, min(r2, len(d.lines) - 1)) {
+                let left = d.lines[r1].trim_end()
+                let right = d.lines[r1 + 1].trim()
+                let glue = "" if right == "" or left == "" else " "
+                c = clen(left)
+                d.lines[r1] = left + glue + right
+                let _ = d.lines.remove_at(r1 + 1)
+            }
+            d.touched(r1)
+            self.go(r1, c)
+        } else if name == "indent" or name == "dedent" {
+            d.checkpoint()
+            var r1 = d.row
+            var r2 = min(d.row + n - 1, len(d.lines) - 1)
+            if visual {
+                let (a, ac, b, bc) = self.sel_range()
+                r1 = a
+                r2 = b
+            }
+            self.shift_lines(r1, r2, 1 if name == "indent" else -1)
+            self.go(d.row, self.first_char(d.row))
+        } else if name == "toggle_comment" {
+            d.checkpoint()
+            var r1 = d.row
+            var r2 = min(d.row + n - 1, len(d.lines) - 1)
+            if visual {
+                let (a, ac, b, bc) = self.sel_range()
+                r1 = a
+                r2 = b
+                self.mode = "normal"
+            }
+            self.comment_lines(r1, r2)
+            self.go(d.row, d.col)
+        } else if name == "toggle_case" or name == "upper_case" or name == "lower_case" {
+            d.checkpoint()
+            var r1 = d.row
+            var c1 = d.col
+            var r2 = d.row
+            var c2 = min(d.col + n, d.line_len(d.row))
+            if visual {
+                let (a, ac, b, bc) = self.sel_range()
+                r1 = a
+                c1 = ac
+                r2 = b
+                c2 = bc
+            }
+            var t = d.text_range(r1, c1, r2, c2)
+            var out = ""
+            for ch in t.chars() {
+                if name == "upper_case" {
+                    out += ch.to_upper()
+                } else if name == "lower_case" {
+                    out += ch.to_lower()
+                } else {
+                    out += ch.to_lower() if ch != ch.to_lower() else ch.to_upper()
+                }
+            }
+            let _ = d.delete_range(r1, c1, r2, c2)
+            let _ = d.insert_at(r1, c1, out)
+            if visual {
+                self.mode = "normal"
+                self.go(r1, c1)
+            } else {
+                self.go(r1, c2)
+            }
+        } else if name == "delete_selection" or name == "cut" {
+            if visual {
+                let lines = self.mode == "vline"
+                self.yank(self.delete_selection(), lines)
+                self.mode = "normal"
+                self.go(d.row, d.col)
+            } else if name == "cut" {
+                self.run("delete_line", n)
+            }
+        } else if name == "yank_selection" or name == "copy" {
+            if visual {
+                let lines = self.mode == "vline"
+                self.yank(self.selection_text(), lines)
+                let (r1, c1, r2, c2) = self.sel_range()
+                self.mode = "normal"
+                self.go(r1, c1)
+                self.say("copied")
+            } else if self.mode == "normal" {
+                self.run("yank_line", n)
+            }
+        } else if name == "change_selection" {
+            if visual {
+                let lines = self.mode == "vline"
+                self.yank(self.delete_selection(), lines)
+                if lines {
+                    let _ = d.insert_at(d.row, 0, "\n")
+                    self.go(d.row, 0)
+                }
+                self.mode = "insert"
+            }
+        } else if name == "delete_word_before" {
+            let start = d.col
+            let (r, c) = self.word_prev(d.row, d.col, false)
+            if r == d.row and c < start {
+                let _ = d.delete_range(d.row, c, d.row, start)
+                d.col = c
+            } else {
+                self.backspace()
+            }
+        } else if name == "delete_to_line_start" {
+            let f = self.first_char(d.row)
+            var c1 = f if d.col > f else 0
+            let _ = d.delete_range(d.row, c1, d.row, d.col)
+            d.col = c1
+        } else if name == "save" {
+            self.save()
+        } else if name == "save_all" {
+            for x in self.docs {
+                if x.dirty and x.path != "" {
+                    let _ = self.save_doc(x)
+                }
+            }
+        } else if name == "quit" {
+            self.request_quit(false)
+        } else if name == "force_quit" {
+            self.request_quit(true)
+        } else if name == "close_buffer" {
+            self.close_buffer(false)
+        } else if name == "next_buffer" {
+            self.cur = (self.cur + 1) % len(self.docs)
+        } else if name == "prev_buffer" {
+            self.cur = (self.cur + len(self.docs) - 1) % len(self.docs)
+        } else if name == "new_buffer" {
+            self.docs.push(open_doc("", -1))
+            self.cur = len(self.docs) - 1
+        } else if name == "buffer_list" {
+            let items: list[str] = []
+            for i in range(len(self.docs)) {
+                let mark = " [+]" if self.docs[i].dirty else ""
+                items.push("${self.doc_label(i)}  ${len(self.docs[i].lines)} lines${mark}")
+            }
+            self.open_picker("buffers", items)
+        } else if name == "find_file" {
+            self.file_cache = all_files(".", 20000)
+            self.open_picker("files", self.file_cache)
+        } else if name == "toggle_sidebar" {
+            self.show_tree = not self.show_tree
+            if self.show_tree {
+                self.refresh_tree()
+            } else if self.mode == "tree" {
+                self.mode = "normal"
+            }
+        } else if name == "focus_sidebar" {
+            if self.mode == "tree" {
+                self.mode = "normal"
+            } else {
+                self.show_tree = true
+                self.refresh_tree()
+                self.mode = "tree"
+            }
+        } else if name == "toggle_panel" {
+            self.show_panel = not self.show_panel and len(self.panel) > 0
+        } else if name == "reload" {
+            if d.path != "" {
+                let fresh = open_doc(d.path, d.lang)
+                d.checkpoint()
+                d.lines = fresh.lines
+                d.clamp()
+                d.touched(0)
+                d.dirty = false
+                self.say("reloaded ${d.path}")
+            }
+            self.refresh_tree()
+        } else if name == "open_config" {
+            let p = config_path()
+            if not exists(p) {
+                let _ = create_dir_all(config_dir())
+                let _ = write(p, SAMPLE_CONFIG)
+            }
+            self.push_jump()
+            self.open(p)
+            self.say("edit and save, then restart dusk (or :source) to apply")
+        } else if name == "help" {
+            self.mode = "help"
+            self.help_top = 0
+        } else if name == "next_theme" {
+            let names = theme_names()
+            let at = names.index_of(self.theme.name).unwrap_or(0)
+            self.set_theme(names[(at + 1) % len(names)])
+        } else if name == "pick_theme" {
+            self.open_picker("themes", theme_names())
+        } else if name == "pick_language" {
+            self.open_picker("languages", self.langs.map(l => l.name))
+        } else if name == "toggle_numbers" {
+            self.cfg.numbers = "relative" if self.cfg.numbers == "absolute" else ("off" if self.cfg.numbers == "relative" else "absolute")
+            self.say("line numbers: ${self.cfg.numbers}")
+        } else if name == "jump_back" {
+            if len(self.jumps) > 0 {
+                let j = self.jumps.pop()
+                if j.path != d.path {
+                    self.open(j.path)
+                }
+                self.go(j.row, j.col)
+            }
+        } else if name == "goto_definition" {
+            self.goto_definition()
+        } else if name == "open_file_under_cursor" {
+            let line = d.lines[d.row]
+            var a = d.col
+            var b = d.col
+            let ok = (c: str) => c != "" and not " \t\"'()<>[]{},;".contains(c)
+            while a > 0 and ok(self.ch(d.row, a - 1)) {
+                a -= 1
+            }
+            while ok(self.ch(d.row, b)) {
+                b += 1
+            }
+            let path = csub(line, a, b)
+            if path != "" and exists(path) {
+                self.push_jump()
+                self.open(path)
+            } else {
+                self.fail("no file ${path}")
+            }
+        } else if name == "rename_symbol_prompt" {
+            let w = self.word_at_cursor()
+            self.fail("put the cursor on a name to rename it") if w == "" else self.start_prompt("rename", w)
+        } else if name == "repeat_last" {
+            if len(self.last_change) > 0 and not self.replaying {
+                self.replaying = true
+                for k in self.last_change.copy() {
+                    self.handle_key(k)
+                }
+                self.replaying = false
+            }
+        } else {
+            self.fail("unknown command: ${name}")
+        }
+    }
+
+    fun ex(self, line: str) {
+        let d = self.doc()
+        var cmd = line.trim()
+        if cmd == "" {
+            return
+        }
+        self.history.push(cmd)
+        var r1 = d.row
+        var r2 = d.row
+        var ranged = false
+        if cmd.starts_with("'<,'>") {
+            let (a, ac, b, bc) = self.sel_range()
+            r1 = a
+            r2 = b
+            ranged = true
+            cmd = cmd.substring(5, cmd.length())
+        } else if cmd.starts_with("%") {
+            r1 = 0
+            r2 = len(d.lines) - 1
+            ranged = true
+            cmd = cmd.substring(1, cmd.length())
+        }
+        // A plugin run from `:'<,'>` reads the selection, so the visual
+        // mode it was started from stays until the plugin has run.
+        let from_visual = cmd.starts_with("plugin.") and (self.prompt_mode_before == "visual" or self.prompt_mode_before == "vline")
+        self.mode = self.prompt_mode_before if from_visual else "normal"
+        match cmd.parse_int() {
+            case Some(n) {
+                self.push_jump()
+                self.go(n - 1, self.first_char(max(0, min(n - 1, len(d.lines) - 1))))
+                return
+            }
+            case None {}
+        }
+        let sp = cmd.index_of(" ")
+        let head = cmd.substring(0, sp) if sp >= 0 else cmd
+        let arg = cmd.substring(sp + 1, cmd.length()).trim() if sp >= 0 else ""
+        if head == "w" or head == "write" {
+            if arg != "" {
+                d.path = arg.replace("\\", "/")
+                d.lang = lang_for_path(self.langs, d.path)
+                d.touched(0)
+            }
+            self.save()
+            self.refresh_tree()
+        } else if head == "q" or head == "quit" {
+            self.close_buffer(false) if len(self.docs) > 1 else self.request_quit(false)
+        } else if head == "q!" {
+            self.request_quit(true)
+        } else if head == "qa" or head == "qall" {
+            self.request_quit(false)
+        } else if head == "wq" or head == "x" {
+            self.save()
+            if not self.error {
+                self.request_quit(false)
+            }
+        } else if head == "wa" {
+            self.run("save_all", 1)
+        } else if head == "e" or head == "edit" or head == "o" or head == "open" {
+            if arg == "" {
+                self.run("reload", 1)
+            } else {
+                self.push_jump()
+                self.open(arg)
+            }
+        } else if head == "bn" or head == "bnext" {
+            self.run("next_buffer", 1)
+        } else if head == "bp" or head == "bprev" {
+            self.run("prev_buffer", 1)
+        } else if head == "bd" or head == "bdelete" {
+            self.close_buffer(false)
+        } else if head == "bd!" {
+            self.close_buffer(true)
+        } else if head == "ls" or head == "buffers" {
+            self.run("buffer_list", 1)
+        } else if head.starts_with("s/") or head == "s" {
+            let body = cmd.substring(1, cmd.length())
+            let parts = body.split("/")
+            if len(parts) < 3 {
+                self.fail("use :s/old/new/ or :%s/old/new/g")
+                return
+            }
+            let all = len(parts) > 3 and parts[3].contains("g")
+            if not ranged {
+                r1 = d.row
+                r2 = d.row
+            }
+            let n = self.replace_in(r1, r2, parts[1], parts[2], all)
+            self.say("${n} replacement(s)")
+        } else if head == "set" {
+            let eq = arg.index_of("=")
+            let key = arg.substring(0, eq) if eq >= 0 else arg
+            let val = arg.substring(eq + 1, arg.length()) if eq >= 0 else ""
+            if key == "number" or key == "nu" {
+                self.cfg.numbers = "absolute"
+            } else if key == "relativenumber" or key == "rnu" {
+                self.cfg.numbers = "relative"
+            } else if key == "nonumber" or key == "nonu" {
+                self.cfg.numbers = "off"
+            } else if key == "tabwidth" or key == "ts" {
+                self.cfg.tab_width = max(1, val.parse_int().unwrap_or(4))
+            } else if key == "expandtab" {
+                self.cfg.expand_tabs = true
+            } else if key == "noexpandtab" {
+                self.cfg.expand_tabs = false
+            } else if key == "autopairs" {
+                self.cfg.auto_pairs = true
+            } else if key == "noautopairs" {
+                self.cfg.auto_pairs = false
+            } else {
+                self.fail("unknown option ${key}")
+                return
+            }
+            self.say("set ${arg}")
+        } else if head == "theme" {
+            self.run("pick_theme", 1) if arg == "" else self.set_theme(arg)
+        } else if head == "lang" or head == "language" {
+            if arg == "" {
+                self.run("pick_language", 1)
+            } else {
+                let i = lang_named(self.langs, arg)
+                if i < 0 {
+                    self.fail("unknown language ${arg}")
+                } else {
+                    d.lang = i
+                    d.touched(0)
+                    self.say("language: ${arg}")
+                }
+            }
+        } else if head == "grep" or head == "rg" {
+            self.run("grep", 1) if arg == "" else self.grep(arg)
+        } else if head == "help" or head == "h" {
+            self.run("help", 1)
+        } else if head == "config" {
+            self.run("open_config", 1)
+        } else if head == "commands" {
+            self.run("command_palette", 1)
+        } else if head == "plugins" {
+            let items: list[str] = []
+            for p in self.cfg.plugins {
+                items.push("plugin.${p.name}  ${p.description}")
+            }
+            self.say("no plugins configured (:config to add one)") if len(items) == 0 else self.open_picker("commands", items)
+        } else if head == "sort" {
+            if not ranged {
+                r1 = 0
+                r2 = len(d.lines) - 1
+            }
+            d.checkpoint()
+            let part = d.lines.slice(r1, r2 + 1).sorted()
+            for i in range(len(part)) {
+                d.lines[r1 + i] = part[i]
+            }
+            d.touched(r1)
+            self.say("sorted ${len(part)} lines")
+        } else if head == "!" or head.starts_with("!") {
+            let shell = cmd.substring(1, cmd.length()).trim()
+            let p = Plugin(
+                "shell",
+                "cmd" if exists("C:/Windows") else "sh",
+                ["/c", shell] if exists("C:/Windows") else ["-c", shell],
+                "none",
+                "panel",
+                "",
+                "",
+                "",
+            )
+            self.run_plugin(p)
+        } else {
+            for (name, desc) in COMMANDS {
+                if name == head {
+                    self.run(name, 1)
+                    return
+                }
+            }
+            if head.starts_with("plugin.") or self.plugin_named(head).is_some() {
+                self.run(head if head.starts_with("plugin.") else "plugin.${head}", 1)
+                if self.mode == "visual" or self.mode == "vline" {
+                    self.mode = "normal"
+                }
+                return
+            }
+            self.fail("not a command: ${head}")
+        }
+    }
+
+    fun keymap_has_prefix(self, mode: str, seq: str) -> bool {
+        let p = seq + " "
+        for m in [mode, "global"] {
+            match self.keys.get(m) {
+                case Some(t) {
+                    for (k, v) in t {
+                        if k.starts_with(p) {
+                            return true
+                        }
+                    }
+                }
+                case None {}
+            }
+        }
+        return false
+    }
+
+    fun lookup(self, mode: str, seq: str) -> str {
+        match self.keys.get(mode) {
+            case Some(t) {
+                match t.get(seq) {
+                    case Some(v) {
+                        return v
+                    }
+                    case None {}
+                }
+            }
+            case None {}
+        }
+        return self.keys.get("global").unwrap().get(seq).unwrap_or("")
+    }
+
+    fun handle_key(self, k: Key) {
+        let name = key_name(k)
+        if not self.replaying and self.mode != "help" {
+            self.message = "" if self.mode == "normal" and self.pending == "" and self.op == "" else self.message
+        }
+        if self.is_recording {
+            self.recording.push(k)
+        }
+        let mode = self.mode
+        if mode == "help" {
+            if name == "esc" or name == "q" or name == "f1" or name == "enter" {
+                self.mode = "normal"
+            } else if name == "j" or name == "down" {
+                self.help_top += 1
+            } else if name == "k" or name == "up" {
+                self.help_top = max(0, self.help_top - 1)
+            } else if name == "pagedown" or name == "space" {
+                self.help_top += self.text_h
+            } else if name == "pageup" {
+                self.help_top = max(0, self.help_top - self.text_h)
+            }
+            return
+        }
+        if mode == "confirm" {
+            self.mode = "normal"
+            if name == "s" or name == "y" {
+                if self.confirm == "quit" {
+                    self.run("save_all", 1)
+                    if self.dirty_count() == 0 {
+                        self.quit = true
+                    }
+                } else {
+                    self.save()
+                    if not self.doc().dirty {
+                        self.close_buffer(true)
+                    }
+                }
+            } else if name == "q" or name == "n" or name == "d" {
+                if self.confirm == "quit" {
+                    self.quit = true
+                } else {
+                    self.close_buffer(true)
+                }
+            } else {
+                self.say("cancelled")
+            }
+            return
+        }
+        if mode == "prompt" {
+            self.prompt_key(k, name)
+            return
+        }
+        if mode == "picker" {
+            self.picker_key(k, name)
+            return
+        }
+        if mode == "tree" {
+            self.tree_key(name)
+            return
+        }
+        let table = "visual" if mode == "vline" else mode
+        if mode == "visual" and self.shift_sel and self.op == "" and self.pending == "" {
+            if self.shift_sel_key(k, name) {
+                return
+            }
+        }
+        if mode == "normal" or mode == "visual" or mode == "vline" {
+            if self.op != "" {
+                self.operator_key(name)
+                return
+            }
+            if self.pending == "r" {
+                self.pending = ""
+                self.replace_char(k)
+                return
+            }
+            let is_digit = name.length() == 1 and name >= "0" and name <= "9"
+            if self.pending == "" and is_digit and (name != "0" or self.count > 0) {
+                self.count = self.count * 10 + name.parse_int().unwrap()
+                return
+            }
+            if mode == "normal" and self.pending == "" and (name == "d" or name == "c" or name == "y" or name == "g c") {
+                self.op = name
+                self.op_count = self.count
+                self.count = 0
+                self.pending = ""
+                if not self.replaying and not self.is_recording {
+                    self.start_recording(k)
+                }
+                return
+            }
+            if mode == "normal" and self.pending == "" and name == "r" {
+                self.pending = "r"
+                return
+            }
+            if self.pending == "" and (name == "f" or name == "t" or name == "F" or name == "T") {
+                self.pending = "find " + name
+                return
+            }
+            if self.pending.starts_with("find ") {
+                var kind = self.pending.substring(5, self.pending.length())
+                self.pending = ""
+                let target = " " if name == "space" else name
+                if target.length() == 1 {
+                    self.last_find = kind
+                    self.last_find_ch = target
+                    self.find_char_motion(kind, target, max(1, self.count))
+                }
+                self.count = 0
+                return
+            }
+            if self.pending == "" and (name == ";" or name == ",") and self.last_find != "" {
+                var kind = self.last_find
+                if name == "," {
+                    let flip = {"f": "F", "F": "f", "t": "T", "T": "t"}
+                    kind = flip.get(kind).unwrap_or(kind)
+                }
+                self.find_char_motion(kind, self.last_find_ch, max(1, self.count))
+                self.count = 0
+                return
+            }
+        }
+        let seq = name if self.pending == "" else self.pending + " " + name
+        let cmd = self.lookup(table, seq)
+        // A key that is both a binding and the start of a longer one waits
+        // for the next key.
+        if cmd != "" and self.keymap_has_prefix(table, seq) {
+            self.pending = seq
+            self.pending_cmd = cmd
+            self.pending_keys.push(k)
+            return
+        }
+        if cmd != "" {
+            self.pending_cmd = ""
+            self.pending_keys.clear()
+            self.pending = ""
+            let count = self.count
+            self.count = 0
+            if mode == "normal" and cmd in CHANGES and not self.replaying and not self.is_recording {
+                self.start_recording(k)
+            }
+            if mode == "normal" and seq == "g c" {
+                self.op = "g c"
+                self.op_count = count
+                return
+            }
+            self.run(cmd, count)
+            self.after_command()
+            return
+        }
+        if self.keymap_has_prefix(table, seq) {
+            self.pending_keys.push(k)
+            self.pending = seq
+            return
+        }
+        if self.pending != "" {
+            // The sequence went nowhere: run the shorter binding it started
+            // with, if any, then handle this key on its own.
+            let fallback = self.pending_cmd
+            let held = self.pending_keys.copy()
+            self.pending = ""
+            self.pending_cmd = ""
+            self.pending_keys.clear()
+            if mode == "insert" and fallback == "" {
+                // `j` waiting for `j k` was really just text.
+                for hk in held {
+                    self.insert_key(hk, key_name(hk))
+                }
+                self.handle_key(k)
+                return
+            }
+            if fallback != "" {
+                let count = self.count
+                self.count = 0
+                self.run(fallback, count)
+                self.after_command()
+                self.handle_key(k)
+            } else {
+                self.count = 0
+            }
+            return
+        }
+        self.count = 0
+        if mode == "insert" {
+            self.insert_key(k, name)
+        }
+    }
+
+    fun start_recording(self, k: Key) {
+        self.is_recording = true
+        let fresh: list[Key] = [k]
+        self.recording = fresh
+    }
+
+    fun after_command(self) {
+        if self.is_recording and self.mode == "normal" and self.op == "" and self.pending == "" {
+            self.is_recording = false
+            self.last_change = self.recording.copy()
+        }
+    }
+
+    // Move to (f, F) or next to (t, T) the count-th `ch` on the line.
+    fun find_char_motion(self, kind: str, ch: str, count: int) {
+        let d = self.doc()
+        let fwd = kind == "f" or kind == "t"
+        let till = kind == "t" or kind == "T"
+        var c = d.col
+        var left = count
+        // Repeating `t` from right before the target must move past it.
+        if till {
+            c = c + 1 if fwd else c - 1
+        }
+        while left > 0 {
+            c = c + 1 if fwd else c - 1
+            if c < 0 or c >= d.line_len(d.row) {
+                return
+            }
+            if self.ch(d.row, c) == ch {
+                left -= 1
+            }
+        }
+        if till {
+            c = c - 1 if fwd else c + 1
+        }
+        self.go(d.row, c)
+    }
+
+    // Keys on a Shift selection made from insert mode behave like an
+    // ordinary editor: typing replaces it, an arrow drops it.
+    fun shift_sel_key(self, k: Key, name: str) -> bool {
+        let d = self.doc()
+        if name.starts_with("shift+") or name.starts_with("ctrl+shift+") {
+            return false
+        }
+        match k {
+            case Char(c) {
+                let _ = self.delete_selection()
+                self.mode = "insert"
+                self.shift_sel = false
+                self.type_char(c)
+                return true
+            }
+            case Backspace {
+                let _ = self.delete_selection()
+                self.mode = "insert"
+                self.shift_sel = false
+                return true
+            }
+            case Delete {
+                let _ = self.delete_selection()
+                self.mode = "insert"
+                self.shift_sel = false
+                return true
+            }
+            case Enter {
+                let _ = self.delete_selection()
+                self.mode = "insert"
+                self.shift_sel = false
+                self.newline()
+                return true
+            }
+            case Esc {
+                self.mode = "insert"
+                self.shift_sel = false
+                return true
+            }
+            case _ {}
+        }
+        if name == "left" or name == "right" or name == "up" or name == "down" or name == "home" or name == "end" {
+            self.mode = "insert"
+            self.shift_sel = false
+            self.insert_key(k, name)
+            return true
+        }
+        return false
+    }
+
+    fun replace_char(self, k: Key) {
+        let d = self.doc()
+        match k {
+            case Char(c) {
+                if d.line_len(d.row) > 0 {
+                    d.checkpoint()
+                    let _ = d.delete_range(d.row, d.col, d.row, d.col + 1)
+                    let _ = d.insert_at(d.row, d.col, c)
+                }
+            }
+            case _ {}
+        }
+    }
+
+    fun insert_key(self, k: Key, name: str) {
+        let d = self.doc()
+        match k {
+            case Char(c) { self.type_char(c) }
+            case Enter { self.newline() }
+            case Backspace { self.backspace() }
+            case Delete {
+                if d.col < d.line_len(d.row) {
+                    let _ = d.delete_range(d.row, d.col, d.row, d.col + 1)
+                } else if d.row + 1 < len(d.lines) {
+                    let _ = d.delete_range(d.row, d.col, d.row + 1, 0)
+                }
+            }
+            case Tab {
+                if self.cfg.expand_tabs {
+                    let unit = self.cfg.tab_width
+                    self.insert_text(" " * (unit - d.col % unit))
+                } else {
+                    self.insert_text("\t")
+                }
+            }
+            case Left { self.go(d.row, d.col - 1) }
+            case Right { self.go(d.row, d.col + 1) }
+            case Up { self.go_vert(d.row - 1) }
+            case Down { self.go_vert(d.row + 1) }
+            case Home {
+                self.go(d.row, self.first_char(d.row) if d.col != self.first_char(d.row) else 0)
+            }
+            case End { self.go(d.row, d.line_len(d.row)) }
+            case PageUp { self.run("page_up", 1) }
+            case PageDown { self.run("page_down", 1) }
+            case _ {}
+        }
+    }
+
+    // `d`, `c`, `y`, and `g c` followed by a motion or text object.
+    fun operator_key(self, name: str) {
+        let d = self.doc()
+        let seq = name if self.pending == "" else self.pending + " " + name
+        if name == "esc" {
+            self.op = ""
+            self.pending = ""
+            self.is_recording = false
+            return
+        }
+        let count = max(1, self.op_count) * max(1, self.count)
+        let is_digit = name.length() == 1 and name >= "1" and name <= "9"
+        if self.pending == "" and is_digit {
+            self.count = self.count * 10 + name.parse_int().unwrap()
+            return
+        }
+        let op = self.op
+        // `dd`, `cc`, `yy`, `gcc`: the whole line(s).
+        let same = seq == op or (op == "g c" and seq == "c")
+        var r1 = d.row
+        var c1 = d.col
+        var r2 = d.row
+        var c2 = d.col
+        var lines = false
+        var found = true
+        if same {
+            lines = true
+            r2 = min(d.row + count - 1, len(d.lines) - 1)
+        } else if seq == "i" or seq == "a" or seq == "f" or seq == "t" or seq == "F" or seq == "T" or seq == "g" {
+            self.pending = seq
+            return
+        } else if seq.starts_with("i ") or seq.starts_with("a ") {
+            let inner = seq.starts_with("i ")
+            let what = seq.substring(2, seq.length())
+            match self.text_object(inner, what) {
+                case Some((a, ac, b, bc)) {
+                    r1 = a
+                    c1 = ac
+                    r2 = b
+                    c2 = bc
+                }
+                case None {
+                    found = false
+                }
+            }
+        } else if seq.starts_with("f ") or seq.starts_with("t ") or seq.starts_with("F ") or seq.starts_with("T ") {
+            let target = seq.substring(2, seq.length())
+            let target_ch = " " if target == "space" else target
+            let fwd = seq.starts_with("f") or seq.starts_with("t")
+            let till = seq.starts_with("t") or seq.starts_with("T")
+            var c = d.col
+            var hit = -1
+            while hit < 0 {
+                c = c + 1 if fwd else c - 1
+                if c < 0 or c >= d.line_len(d.row) {
+                    break
+                }
+                if self.ch(d.row, c) == target_ch {
+                    hit = c
+                }
+            }
+            if hit < 0 {
+                found = false
+            } else if fwd {
+                c2 = hit if till else hit + 1
+            } else {
+                c1 = hit + 1 if till else hit
+                c2 = d.col
+            }
+        } else {
+            let motion = self.lookup("normal", seq)
+            if motion == "" {
+                if self.keymap_has_prefix("normal", seq) {
+                    self.pending = seq
+                    return
+                }
+                found = false
+            } else if motion == "down" or motion == "up" or motion == "file_start" or motion == "file_end" or motion == "paragraph_next" or motion == "paragraph_prev" {
+                let (sr, sc) = (d.row, d.col)
+                let mc = self.count
+                self.run(motion, count if motion == "down" or motion == "up" else mc)
+                r1 = min(sr, d.row)
+                r2 = max(sr, d.row)
+                lines = true
+                d.row = sr
+                d.col = sc
+            } else {
+                let (sr, sc) = (d.row, d.col)
+                let saved_mode = self.mode
+                self.mode = "insert"
+                for _ in range(count) {
+                    if motion == "word_next" and op == "c" and cls(self.ch(d.row, d.col)) != 0 {
+                        let (er, ec) = self.word_end(d.row, d.col, false)
+                        if er == d.row {
+                            d.col = ec + 1
+                        }
+                    } else {
+                        self.run(motion, 1)
+                    }
+                }
+                self.mode = saved_mode
+                var er = d.row
+                var ec = d.col
+                if motion == "word_next" and er > sr {
+                    er = sr
+                    ec = d.line_len(sr)
+                }
+                if motion == "word_end" or motion == "line_end" or motion == "match_bracket" {
+                    ec = min(ec + 1, d.line_len(er))
+                }
+                if er < sr or (er == sr and ec < sc) {
+                    r1 = er
+                    c1 = ec
+                    r2 = sr
+                    c2 = sc
+                } else {
+                    r1 = sr
+                    c1 = sc
+                    r2 = er
+                    c2 = ec
+                }
+                d.row = sr
+                d.col = sc
+            }
+        }
+        self.op = ""
+        self.pending = ""
+        self.count = 0
+        self.op_count = 0
+        if not found {
+            self.is_recording = false
+            return
+        }
+        if op == "y" {
+            if lines {
+                var t = ""
+                for r in range(r1, r2 + 1) {
+                    t += d.lines[r] + "\n"
+                }
+                self.yank(t, true)
+                self.say("yanked ${r2 - r1 + 1} line(s)")
+            } else {
+                self.yank(d.text_range(r1, c1, r2, c2), false)
+                self.go(r1, c1)
+            }
+            self.is_recording = false
+            return
+        }
+        d.checkpoint()
+        if op == "g c" {
+            self.comment_lines(r1, r2)
+        } else if lines {
+            if op == "c" {
+                let indent = d.indent_of(r1)
+                self.yank(d.delete_lines(r1, r2), true)
+                let _ = d.insert_at(min(r1, len(d.lines)), 0, indent + "\n") if r1 < len(d.lines) else d.insert_at(len(d.lines) - 1, d.line_len(len(d.lines) - 1), "\n" + indent)
+                self.mode = "insert"
+                d.row = r1
+                d.col = clen(indent)
+            } else {
+                self.yank(d.delete_lines(r1, r2), true)
+                let r = min(r1, len(d.lines) - 1)
+                self.go(r, self.first_char(r))
+            }
+        } else {
+            self.yank(d.delete_range(r1, c1, r2, c2), false)
+            d.row = r1
+            d.col = c1
+            if op == "c" {
+                self.mode = "insert"
+            } else {
+                self.go(r1, c1)
+            }
+        }
+        self.after_command()
+    }
+
+    // `iw`, `aw`, `i"`, `a(`, ... as (r1, c1, r2, c2), end exclusive.
+    fun text_object(self, inner: bool, what: str) -> Option[(int, int, int, int)] {
+        let d = self.doc()
+        if what == "w" or what == "W" {
+            let (a, b) = self.word_bounds(d.row, d.col)
+            var e = b
+            if not inner {
+                while e < d.line_len(d.row) and cls(self.ch(d.row, e)) == 0 {
+                    e += 1
+                }
+            }
+            return Some((d.row, a, d.row, e))
+        }
+        var open = what
+        var close = what
+        if what == "(" or what == ")" or what == "b" {
+            open = "("
+            close = ")"
+        } else if what == "[" or what == "]" {
+            open = "["
+            close = "]"
+        } else if what == "{" or what == "}" or what == "B" {
+            open = "{"
+            close = "}"
+        } else if what == "<" or what == ">" {
+            open = "<"
+            close = ">"
+        }
+        if open == close {
+            var a = d.col
+            while a >= 0 and self.ch(d.row, a) != open {
+                a -= 1
+            }
+            if a < 0 {
+                return None
+            }
+            var b = d.col + 1 if d.col > a else a + 1
+            while b < d.line_len(d.row) and self.ch(d.row, b) != close {
+                b += 1
+            }
+            if b >= d.line_len(d.row) {
+                return None
+            }
+            return Some((d.row, a + 1, d.row, b)) if inner else Some((d.row, a, d.row, b + 1))
+        }
+        var depth = 0
+        var r = d.row
+        var c = d.col
+        var found = false
+        while not found {
+            let x = self.ch(r, c)
+            if x == close and not (r == d.row and c == d.col) {
+                depth += 1
+            } else if x == open {
+                if depth == 0 {
+                    found = true
+                    break
+                }
+                depth -= 1
+            }
+            let (pr, pc, ok) = self.prev_pos(r, c)
+            if not ok {
+                return None
+            }
+            r = pr
+            c = pc
+        }
+        let sr = r
+        let sc = c
+        depth = 0
+        var er = sr
+        var ec = sc
+        while true {
+            let (nr, nc, ok) = self.next_pos(er, ec)
+            if not ok {
+                return None
+            }
+            er = nr
+            ec = nc
+            let x = self.ch(er, ec)
+            if x == open {
+                depth += 1
+            } else if x == close {
+                if depth == 0 {
+                    break
+                }
+                depth -= 1
+            }
+        }
+        if inner {
+            return Some((sr, sc + 1, er, ec))
+        }
+        return Some((sr, sc, er, ec + 1))
+    }
+
+    fun prompt_key(self, k: Key, name: str) {
+        let kind = self.prompt_kind
+        match k {
+            case Esc {
+                self.mode = "normal"
+                if kind == "search" {
+                    self.go(self.search_origin.row, self.search_origin.col)
+                }
+                return
+            }
+            case Enter {
+                let text = self.prompt
+                self.mode = "normal"
+                if kind == "command" {
+                    self.ex(text)
+                } else if kind == "search" {
+                    if text != "" {
+                        self.search = text
+                    }
+                    let o = self.search_origin
+                    self.go(o.row, o.col)
+                    self.push_jump()
+                    self.search_step(false)
+                } else if kind == "grep" {
+                    self.grep(text)
+                } else if kind == "goto" {
+                    match text.trim().parse_int() {
+                        case Some(n) {
+                            self.push_jump()
+                            self.go(n - 1, self.first_char(max(0, min(n - 1, len(self.doc().lines) - 1))))
+                        }
+                        case None { self.fail("not a line number: ${text}") }
+                    }
+                } else if kind == "rename" {
+                    let old = self.word_at_cursor()
+                    if text != "" and old != "" {
+                        let n = self.rename_word(old, text)
+                        self.say("renamed ${n} occurrence(s) of ${old}")
+                    }
+                } else if kind == "save_as" {
+                    if text != "" {
+                        let d = self.doc()
+                        d.path = text.replace("\\", "/")
+                        d.lang = lang_for_path(self.langs, d.path)
+                        d.touched(0)
+                        self.save()
+                        self.refresh_tree()
+                    }
+                }
+                return
+            }
+            case Backspace {
+                if self.prompt == "" {
+                    self.mode = "normal"
+                } else {
+                    let cs = self.prompt.chars()
+                    let _ = cs.pop()
+                    self.prompt = "".join(cs)
+                }
+            }
+            case Tab {
+                if kind == "command" {
+                    let opts = self.complete(self.prompt)
+                    if len(opts) > 0 {
+                        self.prompt = opts[0]
+                    }
+                }
+            }
+            case Up {
+                if kind == "command" and self.hist_at > 0 {
+                    self.hist_at -= 1
+                    self.prompt = self.history[self.hist_at]
+                }
+            }
+            case Down {
+                if kind == "command" and self.hist_at < len(self.history) - 1 {
+                    self.hist_at += 1
+                    self.prompt = self.history[self.hist_at]
+                }
+            }
+            case Char(c) {
+                self.prompt += c
+            }
+            case Ctrl(c) {
+                if c == "u" {
+                    self.prompt = ""
+                }
+            }
+            case _ {}
+        }
+        if kind == "search" {
+            let o = self.search_origin
+            match self.find(self.prompt, o.row, o.col, self.search_back) {
+                case Some((r, c)) { self.go(r, c) }
+                case None { self.go(o.row, o.col) }
+            }
+        }
+    }
+
+    fun complete(self, text: str) -> list[str] {
+        if text == "" {
+            return []
+        }
+        let words = [
+            "write",
+            "quit",
+            "wq",
+            "edit",
+            "theme",
+            "lang",
+            "set",
+            "sort",
+            "help",
+            "config",
+            "plugins",
+            "commands",
+            "buffers",
+            "bnext",
+            "bprev",
+            "bdelete",
+        ]
+        let out: list[str] = []
+        for w in words {
+            if w.starts_with(text) {
+                out.push(w)
+            }
+        }
+        for (name, desc) in COMMANDS {
+            if name.starts_with(text) {
+                out.push(name)
+            }
+        }
+        for p in self.cfg.plugins {
+            if "plugin.${p.name}".starts_with(text) {
+                out.push("plugin.${p.name}")
+            }
+        }
+        return out
+    }
+
+    fun picker_key(self, k: Key, name: str) {
+        match k {
+            case Esc {
+                self.mode = "normal"
+            }
+            case Enter { self.picker_accept() }
+            case Up {
+                self.picker_sel = max(0, self.picker_sel - 1)
+            }
+            case Down {
+                self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 1)
+            }
+            case Tab {
+                self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 1)
+            }
+            case PageDown {
+                self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 10)
+            }
+            case PageUp {
+                self.picker_sel = max(0, self.picker_sel - 10)
+            }
+            case Backspace {
+                if self.prompt != "" {
+                    let cs = self.prompt.chars()
+                    let _ = cs.pop()
+                    self.prompt = "".join(cs)
+                    self.filter_picker()
+                }
+            }
+            case Char(c) {
+                self.prompt += c
+                self.picker_sel = 0
+                self.filter_picker()
+            }
+            case Ctrl(c) {
+                if c == "n" or c == "j" {
+                    self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 1)
+                } else if c == "p" or c == "k" {
+                    self.picker_sel = max(0, self.picker_sel - 1)
+                } else if c == "u" {
+                    self.prompt = ""
+                    self.filter_picker()
+                } else {
+                    self.mode = "normal"
+                }
+            }
+            case _ {}
+        }
+    }
+
+    fun tree_key(self, name: str) {
+        if name == "j" or name == "down" {
+            self.tree_sel = min(len(self.tree) - 1, self.tree_sel + 1)
+        } else if name == "k" or name == "up" {
+            self.tree_sel = max(0, self.tree_sel - 1)
+        } else if name == "enter" or name == "l" or name == "o" or name == "right" {
+            self.tree_activate(self.tree_sel)
+        } else if name == "h" or name == "left" {
+            if self.tree_sel < len(self.tree) and self.tree[self.tree_sel].open {
+                self.tree_activate(self.tree_sel)
+            }
+        } else if name == "r" {
+            self.refresh_tree()
+            self.say("refreshed")
+        } else if name == "esc" or name == "q" or name == "ctrl+e" or name == "tab" {
+            self.mode = "normal"
+        } else {
+            let cmd = self.lookup("global", name)
+            if cmd != "" {
+                self.mode = "normal"
+                self.run(cmd, 1)
+            }
+        }
+    }
+
+    fun paste_text(self, text: str) {
+        let d = self.doc()
+        if self.mode == "prompt" or self.mode == "picker" {
+            self.prompt += text.split("\n")[0]
+            if self.mode == "picker" {
+                self.filter_picker()
+            }
+            return
+        }
+        d.checkpoint()
+        if self.mode == "visual" or self.mode == "vline" {
+            let _ = self.delete_selection()
+            self.mode = "normal"
+        }
+        self.insert_text(text)
+    }
+
+    fun cell_to_pos(self, x: int, y: int) -> (int, int) {
+        let d = self.doc()
+        let r = max(0, min(d.top + (y - self.text_y), len(d.lines) - 1))
+        let target = d.left + (x - self.text_x - self.gutter_w)
+        let cs = d.lines[r].chars()
+        var col = 0
+        var c = 0
+        while c < len(cs) {
+            let wch = self.cfg.tab_width - col % self.cfg.tab_width if cs[c] == "\t" else 1
+            if col + wch > target {
+                break
+            }
+            col += wch
+            c += 1
+        }
+        return (r, c)
+    }
+
+    fun handle_mouse(self, m: MouseEvent) {
+        if not self.cfg.mouse {
+            return
+        }
+        let x = m.x - 1
+        let y = m.y - 1
+        let d = self.doc()
+        let in_side = self.show_tree and x < self.side_w
+        let in_text = x >= self.text_x and y >= self.text_y and y < self.text_y + self.text_h
+        match m.kind {
+            case ScrollDown {
+                if self.mode == "picker" {
+                    self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 3)
+                } else if self.mode == "help" {
+                    self.help_top += 3
+                } else if in_side {
+                    self.tree_top = min(max(0, len(self.tree) - 1), self.tree_top + 3)
+                } else {
+                    d.top = min(d.top + 3, max(0, len(d.lines) - self.text_h / 2))
+                    let off = min(self.cfg.scroll_off, self.text_h / 2)
+                    if d.row < d.top + off {
+                        self.go_vert(d.top + off)
+                    }
+                }
+            }
+            case ScrollUp {
+                if self.mode == "picker" {
+                    self.picker_sel = max(0, self.picker_sel - 3)
+                } else if self.mode == "help" {
+                    self.help_top = max(0, self.help_top - 3)
+                } else if in_side {
+                    self.tree_top = max(0, self.tree_top - 3)
+                } else {
+                    d.top = max(0, d.top - 3)
+                    let off = min(self.cfg.scroll_off, self.text_h / 2)
+                    if d.row >= d.top + self.text_h - off {
+                        self.go_vert(d.top + self.text_h - off - 1)
+                    }
+                }
+            }
+            case Down {
+                if self.mode == "picker" {
+                    let inside = x >= self.box_x and x < self.box_x + self.box_w and y >= self.box_y and y < self.box_y + self.box_h
+                    if not inside {
+                        self.mode = "normal"
+                        return
+                    }
+                    let i = self.picker_top + (y - self.box_y - 2)
+                    if i >= 0 and i < len(self.picker_shown) {
+                        if i == self.picker_sel {
+                            self.picker_accept()
+                        } else {
+                            self.picker_sel = i
+                        }
+                    }
+                    return
+                }
+                if self.mode == "help" or self.mode == "confirm" {
+                    self.mode = "normal"
+                    return
+                }
+                if self.mode == "prompt" {
+                    self.mode = "normal"
+                }
+                if y == 0 {
+                    for (x0, x1, idx) in self.tab_hits {
+                        if x >= x0 and x < x1 {
+                            if idx < 0 {
+                                self.close_buffer(false)
+                            } else {
+                                self.cur = idx
+                            }
+                            return
+                        }
+                    }
+                    return
+                }
+                if in_side {
+                    let i = self.tree_top + (y - self.text_y)
+                    if i >= 0 and i < len(self.tree) {
+                        if m.button == 0 {
+                            self.tree_activate(i)
+                        }
+                    }
+                    return
+                }
+                if not in_text {
+                    return
+                }
+                let (r, c) = self.cell_to_pos(x, y)
+                if m.button == 1 {
+                    self.go(r, c)
+                    self.paste(false)
+                    return
+                }
+                let now = now_millis()
+                let double = now - self.last_click < 400 and x == self.last_click_x and y == self.last_click_y
+                self.last_click = now
+                self.last_click_x = x
+                self.last_click_y = y
+                if m.mods & 1 != 0 {
+                    if self.mode != "visual" and self.mode != "vline" {
+                        self.anchor_row = d.row
+                        self.anchor_col = d.col
+                        self.shift_sel = self.mode == "insert"
+                        self.mode = "visual"
+                    }
+                    self.go(r, c)
+                    self.dragging = true
+                    return
+                }
+                if self.mode == "insert" {
+                    self.go(r, c)
+                    return
+                }
+                if double {
+                    if x < self.text_x + self.gutter_w {
+                        self.anchor_row = r
+                        self.anchor_col = 0
+                        self.mode = "vline"
+                        self.go(r, 0)
+                        return
+                    }
+                    let (a, b) = self.word_bounds(r, c)
+                    self.anchor_row = r
+                    self.anchor_col = a
+                    self.mode = "visual"
+                    self.go(r, max(a, b - 1))
+                    return
+                }
+                if x < self.text_x + self.gutter_w {
+                    self.anchor_row = r
+                    self.anchor_col = 0
+                    self.mode = "vline"
+                    self.go(r, 0)
+                    self.dragging = true
+                    return
+                }
+                self.mode = "normal"
+                self.go(r, c)
+                self.anchor_row = d.row
+                self.anchor_col = d.col
+                self.dragging = true
+            }
+            case Drag {
+                if not self.dragging {
+                    return
+                }
+                let cy = max(self.text_y, min(y, self.text_y + self.text_h - 1))
+                if y < self.text_y and d.top > 0 {
+                    d.top -= 1
+                } else if y >= self.text_y + self.text_h {
+                    d.top = min(d.top + 1, max(0, len(d.lines) - 1))
+                }
+                let (r, c) = self.cell_to_pos(max(x, self.text_x + self.gutter_w), cy)
+                if self.mode != "vline" and (r != self.anchor_row or c != self.anchor_col) {
+                    self.mode = "visual"
+                }
+                self.go(r, c)
+            }
+            case Up {
+                self.dragging = false
+            }
+            case _ {}
+        }
+    }
+}
+
+// Every built-in command with a short description, for the palette and help.
+let COMMANDS = [
+    ("save", "write the file"),
+    ("save_all", "write every changed file"),
+    ("quit", "quit (asks about unsaved files)"),
+    ("force_quit", "quit without saving"),
+    ("close_buffer", "close the current file"),
+    ("new_buffer", "open an empty buffer"),
+    ("next_buffer", "next open file"),
+    ("prev_buffer", "previous open file"),
+    ("buffer_list", "pick an open file"),
+    ("find_file", "fuzzy-find a file in the project"),
+    ("grep", "search every file in the project"),
+    ("command_palette", "run any command by name"),
+    ("toggle_sidebar", "show or hide the file tree"),
+    ("focus_sidebar", "move the keyboard to the file tree"),
+    ("toggle_panel", "show or hide the plugin output panel"),
+    ("reload", "re-read the file from disk"),
+    ("open_config", "edit ~/.config/dusk/config.toml"),
+    ("help", "keys and commands"),
+    ("next_theme", "cycle the color theme"),
+    ("pick_theme", "choose a color theme"),
+    ("pick_language", "set the file's language"),
+    ("toggle_numbers", "absolute, relative, or no line numbers"),
+    ("undo", "undo the last change"),
+    ("redo", "redo"),
+    ("repeat_last", "repeat the last change (.)"),
+    ("search_forward", "search forward"),
+    ("search_backward", "search backward"),
+    ("search_next", "next match"),
+    ("search_prev", "previous match"),
+    ("search_word", "search the word under the cursor"),
+    ("goto_line", "jump to a line number"),
+    ("goto_definition", "jump to where the name under the cursor is defined"),
+    ("jump_back", "go back to where you were"),
+    ("open_file_under_cursor", "open the path under the cursor"),
+    ("rename_symbol_prompt", "rename the word under the cursor in this file"),
+    ("select_all", "select every line"),
+    ("copy", "copy the selection or line"),
+    ("cut", "cut the selection or line"),
+    ("paste_after", "paste after the cursor"),
+    ("paste_before", "paste before the cursor"),
+    ("toggle_comment", "comment or uncomment lines"),
+    ("indent", "indent lines"),
+    ("dedent", "dedent lines"),
+    ("join_lines", "join lines"),
+    ("toggle_case", "swap upper and lower case"),
+    ("upper_case", "upper-case the selection"),
+    ("lower_case", "lower-case the selection"),
+    ("delete_line", "delete the line"),
+    ("yank_line", "copy the line"),
+    ("change_line", "replace the line"),
+    ("delete_to_end", "delete to the end of the line"),
+    ("match_bracket", "jump to the matching bracket"),
+    ("center_cursor", "scroll the cursor line to the middle"),
+    ("visual", "select characters"),
+    ("visual_line", "select lines"),
+    ("insert_before", "insert mode"),
+    ("open_below", "new line below"),
+    ("open_above", "new line above"),
+]

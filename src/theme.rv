@@ -1,0 +1,238 @@
+// Colors by name. Syntax kinds use their kind names ("keyword", "string",
+// ...); the interface uses "ui.*" names. A config can override any of them
+// with "#rrggbb".
+
+from "github.com/martian56/plumage/style" import Color
+
+class Theme {
+    name: str
+    colors: dict[str, Color]
+}
+
+fun hex(s: str) -> Option[Color] {
+    let h = s.trim().replace("#", "")
+    if h.length() != 6 {
+        return None
+    }
+    let digits = "0123456789abcdef"
+    var vals: list[int] = []
+    let low = h.to_lower()
+    for i in range(6) {
+        let d = digits.index_of(low.char_at(i))
+        if d < 0 {
+            return None
+        }
+        vals.push(d)
+    }
+    return Some(Color.Rgb(vals[0] * 16 + vals[1], vals[2] * 16 + vals[3], vals[4] * 16 + vals[5]))
+}
+
+fun palette(pairs: list[(str, str)]) -> dict[str, Color] {
+    let m: dict[str, Color] = {}
+    for (k, v) in pairs {
+        match hex(v) {
+            case Some(c) { m.set(k, c) }
+            case None {}
+        }
+    }
+    return m
+}
+
+fun theme_names() -> list[str] = ["dusk", "dawn", "gruvbox", "nord"]
+
+fun make_theme(name: str) -> Theme {
+    if name == "dawn" {
+        return Theme(
+            name,
+            palette(
+                [
+                    ("ui.bg", "#fafafa"),
+                    ("ui.fg", "#383a42"),
+                    ("ui.gutter", "#9d9d9f"),
+                    ("ui.gutter.current", "#383a42"),
+                    ("ui.cursorline", "#f0f0f1"),
+                    ("ui.selection", "#d7e3fc"),
+                    ("ui.search", "#f9e2a4"),
+                    ("ui.cursor", "#526fff"),
+                    ("ui.bar", "#e5e5e6"),
+                    ("ui.bar.fg", "#383a42"),
+                    ("ui.tab.active", "#fafafa"),
+                    ("ui.sidebar", "#f0f0f1"),
+                    ("ui.dir", "#4078f2"),
+                    ("ui.popup", "#e5e5e6"),
+                    ("ui.popup.selected", "#c8d7f9"),
+                    ("ui.match", "#c4e2c4"),
+                    ("ui.error", "#e45649"),
+                    ("ui.mode.normal", "#4078f2"),
+                    ("ui.mode.insert", "#50a14f"),
+                    ("ui.mode.visual", "#a626a4"),
+                    ("ui.mode.command", "#c18401"),
+                    ("ui.border", "#c8c8c9"),
+                    ("keyword", "#a626a4"),
+                    ("type", "#c18401"),
+                    ("constant", "#986801"),
+                    ("number", "#986801"),
+                    ("string", "#50a14f"),
+                    ("comment", "#a0a1a7"),
+                    ("function", "#4078f2"),
+                    ("operator", "#0184bc"),
+                    ("directive", "#e45649"),
+                    ("key", "#e45649"),
+                    ("tag", "#e45649"),
+                    ("heading", "#4078f2"),
+                    ("builtin", "#0184bc"),
+                    ("normal", "#383a42"),
+                ],
+            ),
+        )
+    }
+    if name == "gruvbox" {
+        return Theme(
+            name,
+            palette(
+                [
+                    ("ui.bg", "#282828"),
+                    ("ui.fg", "#ebdbb2"),
+                    ("ui.gutter", "#7c6f64"),
+                    ("ui.gutter.current", "#fabd2f"),
+                    ("ui.cursorline", "#32302f"),
+                    ("ui.selection", "#504945"),
+                    ("ui.search", "#79740e"),
+                    ("ui.cursor", "#fe8019"),
+                    ("ui.bar", "#3c3836"),
+                    ("ui.bar.fg", "#ebdbb2"),
+                    ("ui.tab.active", "#282828"),
+                    ("ui.sidebar", "#1d2021"),
+                    ("ui.dir", "#83a598"),
+                    ("ui.popup", "#3c3836"),
+                    ("ui.popup.selected", "#665c54"),
+                    ("ui.match", "#665c54"),
+                    ("ui.error", "#fb4934"),
+                    ("ui.mode.normal", "#83a598"),
+                    ("ui.mode.insert", "#b8bb26"),
+                    ("ui.mode.visual", "#d3869b"),
+                    ("ui.mode.command", "#fabd2f"),
+                    ("ui.border", "#504945"),
+                    ("keyword", "#fb4934"),
+                    ("type", "#fabd2f"),
+                    ("constant", "#d3869b"),
+                    ("number", "#d3869b"),
+                    ("string", "#b8bb26"),
+                    ("comment", "#928374"),
+                    ("function", "#8ec07c"),
+                    ("operator", "#fe8019"),
+                    ("directive", "#8ec07c"),
+                    ("key", "#83a598"),
+                    ("tag", "#fb4934"),
+                    ("heading", "#fabd2f"),
+                    ("builtin", "#fe8019"),
+                    ("normal", "#ebdbb2"),
+                ],
+            ),
+        )
+    }
+    if name == "nord" {
+        return Theme(
+            name,
+            palette(
+                [
+                    ("ui.bg", "#2e3440"),
+                    ("ui.fg", "#d8dee9"),
+                    ("ui.gutter", "#4c566a"),
+                    ("ui.gutter.current", "#d8dee9"),
+                    ("ui.cursorline", "#3b4252"),
+                    ("ui.selection", "#434c5e"),
+                    ("ui.search", "#5e81ac"),
+                    ("ui.cursor", "#88c0d0"),
+                    ("ui.bar", "#3b4252"),
+                    ("ui.bar.fg", "#e5e9f0"),
+                    ("ui.tab.active", "#2e3440"),
+                    ("ui.sidebar", "#272c36"),
+                    ("ui.dir", "#81a1c1"),
+                    ("ui.popup", "#3b4252"),
+                    ("ui.popup.selected", "#4c566a"),
+                    ("ui.match", "#4c566a"),
+                    ("ui.error", "#bf616a"),
+                    ("ui.mode.normal", "#81a1c1"),
+                    ("ui.mode.insert", "#a3be8c"),
+                    ("ui.mode.visual", "#b48ead"),
+                    ("ui.mode.command", "#ebcb8b"),
+                    ("ui.border", "#4c566a"),
+                    ("keyword", "#81a1c1"),
+                    ("type", "#8fbcbb"),
+                    ("constant", "#b48ead"),
+                    ("number", "#b48ead"),
+                    ("string", "#a3be8c"),
+                    ("comment", "#616e88"),
+                    ("function", "#88c0d0"),
+                    ("operator", "#81a1c1"),
+                    ("directive", "#d08770"),
+                    ("key", "#8fbcbb"),
+                    ("tag", "#81a1c1"),
+                    ("heading", "#88c0d0"),
+                    ("builtin", "#88c0d0"),
+                    ("normal", "#d8dee9"),
+                ],
+            ),
+        )
+    }
+    return Theme(
+        "dusk",
+        palette(
+            [
+                ("ui.bg", "#1e2127"),
+                ("ui.fg", "#abb2bf"),
+                ("ui.gutter", "#4b5263"),
+                ("ui.gutter.current", "#e5c07b"),
+                ("ui.cursorline", "#262a31"),
+                ("ui.selection", "#3e4451"),
+                ("ui.search", "#5c4b1f"),
+                ("ui.cursor", "#61afef"),
+                ("ui.bar", "#2c313a"),
+                ("ui.bar.fg", "#abb2bf"),
+                ("ui.tab.active", "#1e2127"),
+                ("ui.sidebar", "#1a1d22"),
+                ("ui.dir", "#61afef"),
+                ("ui.popup", "#2c313a"),
+                ("ui.popup.selected", "#3e4451"),
+                ("ui.match", "#4b5263"),
+                ("ui.error", "#e06c75"),
+                ("ui.mode.normal", "#61afef"),
+                ("ui.mode.insert", "#98c379"),
+                ("ui.mode.visual", "#c678dd"),
+                ("ui.mode.command", "#e5c07b"),
+                ("ui.border", "#3e4451"),
+                ("keyword", "#c678dd"),
+                ("type", "#e5c07b"),
+                ("constant", "#d19a66"),
+                ("number", "#d19a66"),
+                ("string", "#98c379"),
+                ("comment", "#5c6370"),
+                ("function", "#61afef"),
+                ("operator", "#56b6c2"),
+                ("directive", "#e06c75"),
+                ("key", "#e06c75"),
+                ("tag", "#e06c75"),
+                ("heading", "#61afef"),
+                ("builtin", "#56b6c2"),
+                ("normal", "#abb2bf"),
+            ],
+        ),
+    )
+}
+
+impl Theme {
+    fun c(self, name: str) -> Color {
+        return self.colors.get(name).unwrap_or(Color.Default)
+    }
+
+    fun set(self, name: str, value: str) -> bool {
+        return match hex(value) {
+            case Some(c) {
+                self.colors.set(name, c)
+                true
+            }
+            case None { false }
+        }
+    }
+}

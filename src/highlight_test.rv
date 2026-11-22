@@ -1,0 +1,61 @@
+from std.test import assert_eq_str, assert_eq_int
+from "./langs" import builtin_langs, lang_for_path, KIND_NAMES
+from "./highlight" import highlight_line
+
+fun tokens(path: str, line: str, state: int) -> str {
+    let langs = builtin_langs()
+    let l = langs[lang_for_path(langs, path)]
+    let cs = line.chars()
+    let sp = highlight_line(l, cs, state)
+    var out = ""
+    var t = 0
+    while t + 2 < len(sp.items) {
+        var w = ""
+        for k in range(sp.items[t], sp.items[t + 1]) {
+            w += cs[k]
+        }
+        out += "${KIND_NAMES[sp.items[t + 2]]}:${w} "
+        t += 3
+    }
+    return out.trim()
+}
+
+fun test_detects_languages() {
+    let langs = builtin_langs()
+    assert_eq_str(langs[lang_for_path(langs, "src/main.rv")].name, "raven")
+    assert_eq_str(langs[lang_for_path(langs, "a/b/Makefile")].name, "makefile")
+    assert_eq_str(langs[lang_for_path(langs, "x.TSX")].name, "typescript")
+    assert_eq_int(lang_for_path(langs, "notes.unknown"), -1)
+}
+
+fun test_raven_line() {
+    assert_eq_str(
+        tokens("a.rv", "fun main() -> int {", 0),
+        "keyword:fun function:main operator:- operator:> type:int",
+    )
+    assert_eq_str(
+        tokens("a.rv", "let s = \"hi\" // c", 0),
+        "keyword:let operator:= string:\"hi\" comment:// c",
+    )
+}
+
+fun test_block_comment_carries_state() {
+    let langs = builtin_langs()
+    let l = langs[lang_for_path(langs, "a.c")]
+    let first = highlight_line(l, "int x; /* open".chars(), 0)
+    assert_eq_int(first.end_state, 1)
+    assert_eq_str(tokens("a.c", "still */ int y;", 1), "comment:still */ type:int")
+}
+
+fun test_python_docstring_spans_lines() {
+    let langs = builtin_langs()
+    let l = langs[lang_for_path(langs, "a.py")]
+    assert_eq_int(highlight_line(l, "    \"\"\"doc".chars(), 0).end_state, 2)
+}
+
+fun test_json_keys() {
+    assert_eq_str(
+        tokens("a.json", "{\"n\": 3, \"ok\": true}", 0),
+        "key:\"n\" operator:: number:3 key:\"ok\" operator:: constant:true",
+    )
+}
