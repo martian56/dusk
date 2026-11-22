@@ -131,3 +131,74 @@ fun test_language_activation_waits_for_a_file() {
     ed.shutdown_plugins()
     let _ = remove_file("_dusk_lang_test.rv")
 }
+
+fun with_file(name: str, body: str) -> str {
+    write(name, body)
+    return name
+}
+
+fun chars_status(ed: Ed) -> str = ed.plug.status.get("fake/chars").unwrap_or("")
+
+fun test_opening_a_file_updates_char_status() {
+    let f = with_file("_dusk_open_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 5"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_edits_notify_and_recount() {
+    let f = with_file("_dusk_edit_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 5"))
+    keys(ed, "Aab<esc>")
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 7"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_plugin_edit_applies_and_undoes() {
+    let f = with_file("_dusk_pedit_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.edit", 1)
+    assert_true(wait_for(ed, 5000, e => e.doc().lines[0] == "Xhello"))
+    keys(ed, "u")
+    assert_eq_str(ed.doc().lines[0], "hello")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_stale_edit_is_rejected() {
+    let f = with_file("_dusk_stale_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.edit", 1)
+    let _ = ed.doc().insert_at(0, 5, "!")
+    assert_true(wait_for(ed, 5000, e => e.message.contains("stale version")))
+    assert_eq_str(ed.doc().lines[0], "hello!")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_save_and_close_send_events() {
+    let a = with_file("_dusk_ev_a.txt", "a\n")
+    let b = with_file("_dusk_ev_b.txt", "b\n")
+    let ed = editor("record", [a, b])
+    assert_true(ready(ed))
+    ed.ex("w")
+    ed.ex("bdelete")
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => e.plug.status.get("fake/seen").unwrap_or("").contains("buffer/closed"),
+        ),
+    )
+    let seen = ed.plug.status.get("fake/seen").unwrap_or("")
+    assert_true(seen.contains("buffer/opened"))
+    assert_true(seen.contains("buffer/saved"))
+    ed.shutdown_plugins()
+    let _ = remove_file(a)
+    let _ = remove_file(b)
+}

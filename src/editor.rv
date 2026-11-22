@@ -1,6 +1,6 @@
 // The editor: state, commands, and input handling. Rendering is in view.rv.
 
-from std.fs import exists, is_dir, write, create_dir_all
+from std.fs import exists, is_dir, write, create_dir_all, read
 from std.time import now_millis
 from std.process import run_with_input
 from "github.com/martian56/perch/keys" import Key, MouseEvent
@@ -103,6 +103,10 @@ class Plugins {
     owner: dict[str, str] = {}
     // "plugin/id" -> text, drawn in the status line.
     status: dict[str, str] = {}
+    // Buffer path -> the version plugins last heard about.
+    versions: dict[str, int] = {}
+    cursor: str = ""
+    cursor_sent: int = 0
 }
 
 let CHANGES = [
@@ -232,6 +236,8 @@ impl Ed {
             }
         }
         let d = open_doc(p, lang_for_path(self.langs, p))
+        self.notify_plugins("buffer/opened", obj([("path", jstr(p))]))
+        self.plug.versions.set(p, d.version)
         // Replace a single untouched empty buffer.
         if len(self.docs) == 1 and self.docs[0].path == "" and not self.docs[0].dirty {
             self.docs[0] = d
@@ -262,6 +268,7 @@ impl Ed {
     fun save_doc(self, d: Doc) -> bool {
         return match d.save() {
             case Ok(_) {
+                self.notify_plugins("buffer/saved", obj([("path", jstr(d.path))]))
                 self.say("wrote ${d.path} (${len(d.lines)} lines)")
                 true
             }
@@ -316,6 +323,10 @@ impl Ed {
             return
         }
         let _ = self.docs.remove_at(self.cur)
+        if d.path != "" {
+            self.notify_plugins("buffer/closed", obj([("path", jstr(d.path))]))
+            let _ = self.plug.versions.remove(d.path)
+        }
         if len(self.docs) == 0 {
             self.docs.push(open_doc("", -1))
         }
@@ -3088,7 +3099,122 @@ impl Ed {
             args: p.args,
             activation: p.activation,
         )
-        self.plug.hosts.push(start_plugin(spec, "."))
+        let h = start_plugin(spec, ".")
+        self.plug.hosts.push(h)
+        for d in self.docs {
+            if d.path != "" {
+                h.notify("buffer/opened", obj([("path", jstr(d.path))]))
+                self.plug.versions.set(d.path, d.version)
+            }
+        }
+    }
+
+    fun notify_plugins(self, method: str, params: JsonValue) {
+        for h in self.plug.hosts {
+            h.notify(method, params)
+        }
+    }
+
+    fun doc_at(self, path: str) -> Option[Doc] {
+        let p = path.replace("\\", "/")
+        if p == "" {
+            return Some(self.doc())
+        }
+        for d in self.docs {
+            if d.path == p {
+                return Some(d)
+            }
+        }
+        return None
+    }
+
+    // Changes and cursor moves since the last tick, batched per buffer.
+    fun send_buffer_events(self, now_ms: int) {
+        if len(self.plug.hosts) == 0 {
+            return
+        }
+        for d in self.docs {
+            if d.path != "" and self.plug.versions.get(d.path).unwrap_or(0 - 1) != d.version {
+                self.plug.versions.set(d.path, d.version)
+                self.notify_plugins(
+                    "buffer/changed",
+                    obj([("path", jstr(d.path)), ("version", jint(d.version))]),
+                )
+            }
+        }
+        let d = self.doc()
+        let at = "${d.path}:${d.row}:${d.col}"
+        if at != self.plug.cursor and now_ms - self.plug.cursor_sent >= 100 {
+            self.plug.cursor = at
+            self.plug.cursor_sent = now_ms
+            self.notify_plugins(
+                "cursor/moved",
+                obj([("path", jstr(d.path)), ("row", jint(d.row)), ("col", jint(d.col))]),
+            )
+        }
+    }
+
+    fun read_for_plugin(self, h: PluginProc, id: int, path: str) {
+        match self.doc_at(path) {
+            case Some(d) {
+                h.respond(id, obj([("text", jstr(d.text())), ("version", jint(d.version))]))
+                return
+            }
+            case None {}
+        }
+        match read(path) {
+            case Ok(t) { h.respond(id, obj([("text", jstr(t)), ("version", jint(0 - 1))])) }
+            case Err(e) { h.respond_error(id, "no buffer or file ${path}") }
+        }
+    }
+
+    // Apply a plugin's edits as one undo step, last range first so earlier
+    // positions stay valid.
+    fun edit_for_plugin(self, h: PluginProc, id: int, path: str, version: int, edits: list[Edit]) {
+        let d = match self.doc_at(path) {
+            case Some(x) { x }
+            case None {
+                h.respond_error(id, "no open buffer ${path}")
+                return
+            }
+        }
+        if version != d.version {
+            let why = "stale version ${version}, buffer is at ${d.version}"
+            h.respond_error(id, why)
+            self.fail("${h.spec.name}: edit refused: ${why}")
+            return
+        }
+        for e in edits {
+            let ok_start = e.start_row >= 0 and e.start_row < len(d.lines) and e.start_col >= 0 and e.start_col <= d.line_len(
+                e.start_row,
+            )
+            let ok_end = e.end_row >= 0 and e.end_row < len(d.lines) and e.end_col >= 0 and e.end_col <= d.line_len(
+                e.end_row,
+            )
+            let ordered = e.end_row > e.start_row or (e.end_row == e.start_row and e.end_col >= e.start_col)
+            if not (ok_start and ok_end and ordered) {
+                h.respond_error(id, "edit range out of bounds")
+                return
+            }
+        }
+        let order = edits.sorted_by(
+            (a, b) => (b.start_row - a.start_row) * 1000000 + b.start_col - a.start_col,
+        )
+        d.checkpoint()
+        for e in order {
+            let _ = d.delete_range(e.start_row, e.start_col, e.end_row, e.end_col)
+            let _ = d.insert_at(e.start_row, e.start_col, e.text)
+        }
+        d.clamp()
+        h.respond(id, obj([("version", jint(d.version))]))
+    }
+
+    fun open_for_plugin(self, h: PluginProc, id: int, path: str, line: int) {
+        self.push_jump()
+        self.open(path)
+        let r = max(0, min(line - 1, len(self.doc().lines) - 1))
+        self.go(r, self.first_char(r))
+        h.respond(id, obj([]))
     }
 
     fun host_named(self, name: str) -> Option[PluginProc] {
@@ -3147,6 +3273,7 @@ impl Ed {
     }
 
     fun plugin_tick(self, now_ms: int) {
+        self.send_buffer_events(now_ms)
         for h in self.plug.hosts {
             for a in h.poll(now_ms) {
                 self.apply_action(a)
@@ -3196,7 +3323,24 @@ impl Ed {
                 }
             }
             case Failed(p, why) { self.fail("${p}: ${why}") }
-            case _ {}
+            case ReadText(p, id, path) {
+                match self.host_named(p) {
+                    case Some(h) { self.read_for_plugin(h, id, path) }
+                    case None {}
+                }
+            }
+            case EditBuffer(p, id, path, version, edits) {
+                match self.host_named(p) {
+                    case Some(h) { self.edit_for_plugin(h, id, path, version, edits) }
+                    case None {}
+                }
+            }
+            case OpenBuffer(p, id, path, line) {
+                match self.host_named(p) {
+                    case Some(h) { self.open_for_plugin(h, id, path, line) }
+                    case None {}
+                }
+            }
         }
     }
 }
