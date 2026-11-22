@@ -117,8 +117,9 @@ list of blocks that dusk lays out top to bottom:
 - `progress`: a spinner or a bar with a label.
 
 The plugin replaces a panel's content by sending `ui/panel` again with the
-same id; dusk keeps scroll position and focus. Focus moves between the editor
-and panels with Ctrl+W followed by an arrow, and with the mouse.
+same id; dusk keeps scroll position and focus. F6 moves focus to the next
+panel and back to the editor (Shift+F6 goes the other way), and a click
+focuses whatever it lands on. Ctrl+W keeps closing the current file.
 
 ### Robustness
 
@@ -195,4 +196,5 @@ Each step ships on its own and keeps everything working:
 - A 50 ms tick while plugins run.
 - rook writes to disk and dusk reloads, for the first version.
 - Delivery order above, with install last.
+- F6 and Shift+F6 to move focus between the editor and panels.
 - The Raven SDK as a separate package.
