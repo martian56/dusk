@@ -1,6 +1,8 @@
 from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
 from std.env import get_env
-from std.fs import write, remove_file
+from std.fs import write, remove_file, create_dir_all
+from std.process import run
+from "./install" import remove_tree
 from std.time import now_millis
 from std.sync import sleep_millis
 from "github.com/martian56/plumage" import Frame
@@ -625,4 +627,32 @@ fun test_files_changed_keeps_unsaved_edits() {
     assert_eq_str(ed.doc().lines[0], "beforemine")
     ed.shutdown_plugins()
     let _ = remove_file(f)
+}
+
+fun test_plugin_install_and_remove_from_the_editor() {
+    let root = "_dusk_ed_install"
+    let _ = remove_tree(root)
+    let _ = create_dir_all("${root}/src")
+    let _ = run("git", ["init", "-q", "${root}/src"])
+    let bin = "../../../" + fake_binary()
+    write(
+        "${root}/src/dusk-plugin.toml",
+        "name = \"fake\"\nversion = \"0.1.0\"\ncommand = \"${bin}\"\nargs = [\"echo\"]\n",
+    )
+    let id = ["-C", "${root}/src", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    let _ = run("git", id.concat(["add", "."]))
+    let _ = run("git", id.concat(["commit", "-q", "-m", "first"]))
+    let _ = run("git", id.concat(["tag", "v0.1.0"]))
+    let ed = new_editor_with([], Config())
+    ed.plug.install_root = "${root}/plugins"
+    ed.ex("plugin install ./${root}/src@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.plug.commands.has("fake.hello")))
+    assert_true(ed.message.contains("installed fake 0.1.0"))
+    ed.ex("plugin list")
+    assert_true(ed.message.contains("fake 0.1.0 @v0.1.0"))
+    ed.ex("plugin remove fake")
+    assert_true(wait_for(ed, 10000, e => e.message.contains("removed fake")))
+    assert_false(ed.plug.commands.has("fake.hello"))
+    assert_eq_int(len(ed.plug.hosts), 0)
+    let _ = remove_tree(root)
 }

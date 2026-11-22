@@ -122,6 +122,44 @@ protocol = true
 activation = ["startup"]      # or ["language:raven"]
 ```
 
+Install a plugin from git, pinned to a tag:
+
+```
+:plugin install github.com/martian56/dusk-todo@v0.1.0
+:plugin update todo          # to its newest tag, or todo@v0.2.0
+:plugin remove todo
+:plugin list
+```
+
+Installed plugins live in `~/.config/dusk/plugins` and start with dusk. A
+plugin repository has a `dusk-plugin.toml`:
+
+```toml
+name = "todo"
+version = "0.1.0"
+description = "List TODO lines"
+command = "./todo"            # relative to the plugin's directory, or on PATH
+args = []
+activation = ["startup"]
+build = ["rvpm", "build"]     # optional, run once after cloning
+
+[windows]
+command = "./todo.exe"
+```
+
+A `[[plugin]]` entry in `config.toml` with the same name wins over an
+installed one, which helps while developing a plugin.
+
+To run rook, the coding agent, in a panel beside your code:
+
+```toml
+[[plugin]]
+name = "rook"
+command = "rook"
+args = ["--dusk"]
+protocol = true
+```
+
 A protocol plugin's commands show up in the palette and in `:plugins`, and its
 key bindings never override yours or dusk's. A plugin that crashes is
 restarted the next time you use it (three times at most), one that floods

@@ -27,3 +27,9 @@ fun test_fuzzy_prefers_file_names() {
     assert_eq_str(best[0], "src/editor.rv")
     assert_eq_int(len(best), 2)
 }
+
+fun test_sleep_token_parses() {
+    let evs = parse_script("a<sleep:250>b")
+    assert_eq_int(len(evs), 3)
+    assert_eq_int(evs[1].sleep_ms, 250)
+}

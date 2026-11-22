@@ -22,6 +22,14 @@ from "./ui" import (
     paste_into,
     has_selection,
 )
+from std.sync import Mutex, mutex
+from "./install" import (
+    install_into,
+    installed_plugins,
+    remove_installed,
+    update_installed,
+    list_text,
+)
 from "./host" import (
     PluginSpec,
     PluginProc,
@@ -114,6 +122,23 @@ class Ed {
     dragging: bool = false
 }
 
+// An install or update running on a goroutine, so git never blocks the
+// editor. The tick applies the result.
+class Job {
+    lock: Mutex
+    name: str
+    done: bool = false
+    result: str = ""
+}
+
+fun run_install(job: Job, dir: str, url: str, ref: str, update: bool) {
+    let r = update_installed(dir, url, ref) if update else install_into(dir, url, ref)
+    job.lock.lock()
+    job.result = r
+    job.done = true
+    job.lock.unlock()
+}
+
 // A pick or prompt a plugin asked for, answered on the process that asked.
 class Ask {
     host: PluginProc
@@ -150,6 +175,9 @@ class Plugins {
     asking: bool = false
     // Path -> plugin -> its marks for that file.
     marks: dict[str, dict[str, list[Mark]]] = {}
+    // Where :plugin install puts plugins; "" means ~/.config/dusk/plugins.
+    install_root: str = ""
+    jobs: list[Job] = []
 }
 
 fun severity_rank(s: str) -> int {
@@ -184,7 +212,16 @@ let CHANGES = [
     "open_above",
 ]
 
-fun new_editor(paths: list[str]) -> Ed = new_editor_with(paths, load_config())
+fun new_editor(paths: list[str]) -> Ed {
+    let cfg = load_config()
+    // Installed plugins, unless the config already has one by that name.
+    for p in installed_plugins(config_dir() + "/plugins") {
+        if not cfg.plugins.any(q => q.name == p.name) {
+            cfg.plugins.push(p)
+        }
+    }
+    return new_editor_with(paths, cfg)
+}
 
 fun new_editor_with(paths: list[str], cfg: Config) -> Ed {
     let langs = builtin_langs()
@@ -2035,6 +2072,8 @@ impl Ed {
             }
         } else if head == "plugin" and arg.starts_with("log") {
             self.show_plugin_log(arg.substring(3, arg.length()).trim())
+        } else if head == "plugin" {
+            self.plugin_admin(arg)
         } else if head == "sort" {
             if not ranged {
                 r1 = 0
@@ -3456,6 +3495,9 @@ impl Ed {
             }
         }
         self.update_asks()
+        if len(self.plug.jobs) > 0 {
+            self.finish_jobs()
+        }
     }
 
     fun shutdown_plugins(self) {
@@ -3709,6 +3751,115 @@ impl Ed {
             self.say("reloaded ${p}, changed by ${plugin}")
             return
         }
+    }
+
+    fun plugins_dir(self) -> str = self.plug.install_root if self.plug.install_root != "" else config_dir() + "/plugins"
+
+    // :plugin install <url>[@tag], update <name>[@tag], remove <name>, list.
+    fun plugin_admin(self, arg: str) {
+        let sp = arg.index_of(" ")
+        let verb = arg.substring(0, sp) if sp >= 0 else arg
+        let rest = arg.substring(sp + 1, arg.length()).trim() if sp >= 0 else ""
+        if verb == "list" {
+            self.say(list_text(self.plugins_dir()))
+            return
+        }
+        if rest == "" {
+            self.fail(
+                "usage: :plugin install <git url>[@tag], :plugin update <name>[@tag], :plugin remove <name>, :plugin list, :plugin log <name>",
+            )
+            return
+        }
+        if verb == "remove" {
+            self.stop_plugin(rest)
+            let msg = remove_installed(self.plugins_dir(), rest)
+            if msg.starts_with("error:") {
+                self.fail(msg)
+            } else {
+                self.cfg.plugins = self.cfg.plugins.filter(p => p.name != rest)
+                self.say(msg)
+            }
+            return
+        }
+        if verb != "install" and verb != "update" {
+            self.fail("unknown :plugin action ${verb}")
+            return
+        }
+        // A tag follows the last @ that is not part of an scp-style host.
+        var target = rest
+        var ref = ""
+        let at = rest.last_index_of("@")
+        if at > 0 and not rest.substring(at, rest.length()).contains(":") and not rest.substring(
+            at,
+            rest.length(),
+        ).contains("/") {
+            target = rest.substring(0, at)
+            ref = rest.substring(at + 1, rest.length())
+        }
+        if verb == "update" {
+            // Windows keeps a running program's files locked.
+            self.stop_plugin(target)
+        }
+        let job = Job(lock: mutex(), name: target)
+        self.plug.jobs.push(job)
+        let dir = self.plugins_dir()
+        let update = verb == "update"
+        spawn {
+            run_install(job, dir, target, ref, update)
+        }
+        self.say("${verb if verb == "update" else "installing"} ${target}...")
+    }
+
+    // Shut a plugin down and forget its commands and UI.
+    fun stop_plugin(self, name: str) {
+        let keep: list[PluginProc] = []
+        for h in self.plug.hosts {
+            if h.spec.name == name {
+                h.shutdown()
+                self.clear_plugin_ui(h)
+            } else {
+                keep.push(h)
+            }
+        }
+        self.plug.hosts = keep
+        for c in self.plug.owner.keys() {
+            if self.plug.owner.get(c).unwrap_or("") == name {
+                let _ = self.plug.owner.remove(c)
+                let _ = self.plug.commands.remove(c)
+            }
+        }
+    }
+
+    fun finish_jobs(self) {
+        let waiting: list[Job] = []
+        for job in self.plug.jobs {
+            job.lock.lock()
+            let done = job.done
+            let result = job.result
+            job.lock.unlock()
+            if not done {
+                waiting.push(job)
+                continue
+            }
+            if result.starts_with("error:") {
+                self.fail(result)
+                continue
+            }
+            // Take the freshly installed copy and start it.
+            for p in installed_plugins(self.plugins_dir()) {
+                if result.starts_with("installed ${p.name} ") {
+                    self.stop_plugin(p.name)
+                    self.cfg.plugins = self.cfg.plugins.filter(q => q.name != p.name)
+                    self.cfg.plugins.push(p)
+                    if p.activation.contains("startup") {
+                        self.start_host(p)
+                    }
+                }
+            }
+            self.activate_for_language()
+            self.say(result)
+        }
+        self.plug.jobs = waiting
     }
 
     fun has_marks(self, path: str) -> bool {

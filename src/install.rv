@@ -1,0 +1,398 @@
+// Installed protocol plugins: git repositories with a dusk-plugin.toml,
+// cloned under ~/.config/dusk/plugins and pinned to a tag.
+//
+//     name = "todo"
+//     version = "0.2.0"
+//     description = "List TODO lines"
+//     command = "./todo"            # relative to the plugin's directory, or on PATH
+//     args = []
+//     activation = ["startup"]
+//     build = ["rvpm", "build"]     # optional, run in the plugin's directory
+//
+//     [windows]
+//     command = "./todo.exe"
+
+from std.fs import read, write, exists, is_dir, list_dir, create_dir_all
+from std.env import os_name
+from std.process import run, Output
+from std.json import JsonValue, parse as parse_json, stringify, json_object, json_string
+from "github.com/martian56/raven-toml" import parse, Toml
+from "./config" import Plugin
+
+let MANIFEST = "dusk-plugin.toml"
+let LOCK = ".dusk-plugin.lock"
+
+class Manifest {
+    name: str
+    version: str
+    description: str
+    command: str
+    args: list[str]
+    activation: list[str]
+    build: list[str]
+}
+
+fun read_manifest(dir: str) -> Result[Manifest, str] {
+    let text = match read("${dir}/${MANIFEST}") {
+        case Ok(t) { t }
+        case Err(e) {
+            return Err("no ${MANIFEST}; it is not a dusk plugin")
+        }
+    }
+    let t = match parse(text) {
+        case Ok(x) { x }
+        case Err(e) {
+            return Err("${MANIFEST}: ${e.to_string()}")
+        }
+    }
+    let name = t.get_string_or("name", "")
+    var command = t.get_string_or("command", "")
+    let platform = "windows" if os_name() == "windows" else "linux"
+    command = t.get_string_or("${platform}.command", command)
+    if name == "" or command == "" {
+        return Err("${MANIFEST} needs a name and a command")
+    }
+    let activation = t.get_strings("activation")
+    return Ok(
+        Manifest(
+            name: name,
+            version: t.get_string_or("version", ""),
+            description: t.get_string_or("description", ""),
+            command: command,
+            args: t.get_strings("args"),
+            activation: activation if len(activation) > 0 else ["startup"],
+            build: t.get_strings("build"),
+        ),
+    )
+}
+
+fun dir_name_from_url(url: str) -> str {
+    var u = url.trim().replace("\\", "/")
+    while u.ends_with("/") {
+        u = u.substring(0, u.length() - 1)
+    }
+    if u.ends_with(".git") {
+        u = u.substring(0, u.length() - 4)
+    }
+    let slash = u.last_index_of("/")
+    return u.substring(slash + 1, u.length()) if slash >= 0 else u
+}
+
+// A bare github.com/user/repo becomes an https URL; URLs and paths stay.
+fun normalize_url(url: str) -> str {
+    let u = url.trim()
+    let drive = u.length() > 2 and u.substring(1, 2) == ":"
+    if u.contains("://") or u.starts_with("git@") or u.starts_with("/") or u.starts_with(".") or u.starts_with(
+        "~",
+    ) or drive {
+        return u
+    }
+    return "https://${u}"
+}
+
+fun output_error(command: str, o: Output) -> str {
+    var msg = o.stderr.trim()
+    if msg == "" {
+        msg = o.stdout.trim()
+    }
+    return "${command}: ${msg if msg != "" else "exit ${o.code}"}"
+}
+
+fun run_ok(program: str, args: list[str]) -> str {
+    return match run(program, args) {
+        case Ok(o) { "" if o.code == 0 else output_error(program, o) }
+        case Err(e) { "${program} failed to start: ${e.message}" }
+    }
+}
+
+fun native(path: str) -> str = path.replace("/", "\\") if os_name() == "windows" else path
+
+// Remove a directory tree. git leaves read-only pack files on Windows, so
+// clear that attribute first.
+fun remove_tree(path: str) -> str {
+    if not exists(path) {
+        return ""
+    }
+    if os_name() == "windows" {
+        let _ = run_ok("attrib", ["-r", "-s", "-h", "/s", "/d", "${native(path)}\\*"])
+        let _ = run_ok("cmd", ["/d", "/c", "rmdir", "/s", "/q", native(path)])
+    } else {
+        let _ = run_ok("rm", ["-rf", path])
+    }
+    return "" if not exists(path) else "could not remove ${path}"
+}
+
+fun move_tree(from: str, to: str) -> str {
+    let err = run_ok("cmd", ["/d", "/c", "move", "/y", native(from), native(to)]) if os_name() == "windows" else run_ok("mv", [from, to])
+    if err != "" {
+        return err
+    }
+    return "" if exists(to) and not exists(from) else "could not move ${from} to ${to}"
+}
+
+fun shell_quote(s: str) -> str {
+    if not s.contains(" ") and not s.contains("\"") {
+        return s
+    }
+    return "\"" + s.replace("\"", "\\\"") + "\""
+}
+
+// Run the manifest's build command inside `dir`.
+fun build_in(dir: str, build: list[str]) -> str {
+    if len(build) == 0 {
+        return ""
+    }
+    let line = " ".join(build.map(a => shell_quote(a)))
+    if os_name() == "windows" {
+        return run_ok("cmd", ["/d", "/c", "cd /d ${shell_quote(native(dir))} && ${line}"])
+    }
+    return run_ok("sh", ["-c", "cd ${shell_quote(dir)} && ${line}"])
+}
+
+fun lock_json(source: str, ref: str, version: str) -> str {
+    let m: dict[str, JsonValue] = {}
+    m.set("source", json_string(source))
+    m.set("ref", json_string(ref))
+    m.set("version", json_string(version))
+    return stringify(json_object(m))
+}
+
+fun lock_field(dir: str, key: str) -> str {
+    return match read("${dir}/${LOCK}") {
+        case Ok(t) {
+            match parse_json(t) {
+                case Ok(v) {
+                    match v.get(key) {
+                        case Some(x) { x.as_string().unwrap_or("") }
+                        case None { "" }
+                    }
+                }
+                case Err(e) { "" }
+            }
+        }
+        case Err(e) { "" }
+    }
+}
+
+// Clone `url` at `ref` (a tag or branch, "" for the default branch) into a
+// staging directory, check its manifest, build it, then swap it into place.
+// The previous copy stays until the new one is in place.
+fun install_into(plugins_dir: str, url: str, ref: str) -> str {
+    let u = url.trim()
+    if u == "" {
+        return "error: install needs a git URL"
+    }
+    let name = dir_name_from_url(u)
+    if name == "" or name.starts_with(".") or name.contains("..") {
+        return "error: cannot name a plugin directory after ${u}"
+    }
+    let _ = create_dir_all("${plugins_dir}/.staging")
+    let staging = "${plugins_dir}/.staging/${name}"
+    let backup = "${plugins_dir}/.staging/${name}.old"
+    let target = "${plugins_dir}/${name}"
+    let _ = remove_tree(staging)
+    let _ = remove_tree(backup)
+    let args = ["clone", "-q", "--depth", "1"]
+    if ref.trim() != "" {
+        args.push("--branch")
+        args.push(ref.trim())
+    }
+    args.push(normalize_url(u))
+    args.push(staging)
+    let cloned = run_ok("git", args)
+    if cloned != "" {
+        let _ = remove_tree(staging)
+        return "error: ${cloned}"
+    }
+    let m = match read_manifest(staging) {
+        case Ok(x) { x }
+        case Err(e) {
+            let _ = remove_tree(staging)
+            return "error: ${u} has ${e}"
+        }
+    }
+    let built = build_in(staging, m.build)
+    if built != "" {
+        let _ = remove_tree(staging)
+        return "error: building ${m.name} failed: ${built}"
+    }
+    match write("${staging}/${LOCK}", lock_json(u, ref.trim(), m.version)) {
+        case Ok(ok) {}
+        case Err(e) {
+            let _ = remove_tree(staging)
+            return "error: could not write ${LOCK}: ${e.message()}"
+        }
+    }
+    let had = exists(target)
+    if had {
+        let moved = move_tree(target, backup)
+        if moved != "" {
+            let _ = remove_tree(staging)
+            return "error: could not replace ${m.name}: ${moved}"
+        }
+    }
+    let swapped = move_tree(staging, target)
+    if swapped != "" {
+        if had {
+            let _ = move_tree(backup, target)
+        }
+        return "error: could not install ${m.name}: ${swapped}"
+    }
+    let _ = remove_tree(backup)
+    let v = m.version if m.version != "" else "unversioned"
+    return "installed ${m.name} ${v} from ${u}"
+}
+
+fun resolve_command(dir: str, command: str) -> str {
+    let c = command.replace("\\", "/")
+    if c.starts_with("./") {
+        return "${dir}/${c.substring(2, c.length())}"
+    }
+    if c.starts_with("../") or (c.contains("/") and not c.starts_with("/") and not (c.length() > 2 and c.substring(
+        1,
+        2,
+    ) == ":")) {
+        return "${dir}/${c}"
+    }
+    return c
+}
+
+// Directories under `plugins_dir` holding an installed plugin, as
+// (directory, manifest).
+fun installed(plugins_dir: str) -> list[(str, Manifest)] {
+    let out: list[(str, Manifest)] = []
+    let names = match list_dir(plugins_dir) {
+        case Ok(xs) { xs }
+        case Err(e) {
+            return out
+        }
+    }
+    for n in names.sorted() {
+        let dir = "${plugins_dir}/${n}"
+        if n.starts_with(".") or not is_dir(dir) {
+            continue
+        }
+        match read_manifest(dir) {
+            case Ok(m) { out.push((dir, m)) }
+            case Err(e) {}
+        }
+    }
+    return out
+}
+
+fun installed_plugins(plugins_dir: str) -> list[Plugin] {
+    let out: list[Plugin] = []
+    for (dir, m) in installed(plugins_dir) {
+        out.push(
+            Plugin(
+                name: m.name,
+                command: resolve_command(dir, m.command),
+                args: m.args,
+                input: "none",
+                output: "message",
+                key: "",
+                on: "",
+                description: m.description,
+                protocol: true,
+                activation: m.activation,
+            ),
+        )
+    }
+    return out
+}
+
+fun dir_of(plugins_dir: str, name: str) -> str {
+    for (dir, m) in installed(plugins_dir) {
+        if m.name == name {
+            return dir
+        }
+    }
+    return ""
+}
+
+fun remove_installed(plugins_dir: str, name: str) -> str {
+    let dir = dir_of(plugins_dir, name)
+    if dir == "" {
+        return "error: no installed plugin ${name}"
+    }
+    let err = remove_tree(dir)
+    return "removed ${name}" if err == "" else "error: ${err}"
+}
+
+// "v1.2.3" or "1.2.3" as numbers, or [] when it is not a version.
+fun version_parts(tag: str) -> list[int] {
+    let t = tag.substring(1, tag.length()) if tag.starts_with("v") else tag
+    let out: list[int] = []
+    for p in t.split(".") {
+        match p.parse_int() {
+            case Some(n) { out.push(n) }
+            case None {
+                return []
+            }
+        }
+    }
+    return out
+}
+
+fun newer(a: list[int], b: list[int]) -> bool {
+    for i in range(max(len(a), len(b))) {
+        let x = a[i] if i < len(a) else 0
+        let y = b[i] if i < len(b) else 0
+        if x != y {
+            return x > y
+        }
+    }
+    return false
+}
+
+// The highest version tag of a repository, "" when it has none.
+fun latest_tag(url: str) -> str {
+    let o = match run("git", ["ls-remote", "--tags", "--refs", normalize_url(url)]) {
+        case Ok(x) { x }
+        case Err(e) {
+            return ""
+        }
+    }
+    var best = ""
+    var best_parts: list[int] = []
+    for line in o.stdout.split("\n") {
+        let at = line.index_of("refs/tags/")
+        if at < 0 {
+            continue
+        }
+        let tag = line.substring(at + 10, line.length()).trim()
+        let parts = version_parts(tag)
+        if len(parts) > 0 and (best == "" or newer(parts, best_parts)) {
+            best = tag
+            best_parts = parts
+        }
+    }
+    return best
+}
+
+// Reinstall from the recorded source at `ref`, or at its newest tag.
+fun update_installed(plugins_dir: str, name: str, ref: str) -> str {
+    let dir = dir_of(plugins_dir, name)
+    if dir == "" {
+        return "error: no installed plugin ${name}"
+    }
+    let source = lock_field(dir, "source")
+    if source == "" {
+        return "error: ${name} has no recorded source; install it again"
+    }
+    let want = ref if ref != "" else latest_tag(source)
+    return install_into(plugins_dir, source, want)
+}
+
+fun list_text(plugins_dir: str) -> str {
+    let items = installed(plugins_dir)
+    if len(items) == 0 {
+        return "no installed plugins (:plugin install <git url>[@tag])"
+    }
+    let parts: list[str] = []
+    for (dir, m) in items {
+        let ref = lock_field(dir, "ref")
+        parts.push("${m.name} ${m.version}${" @${ref}" if ref != "" else ""}")
+    }
+    return "installed: ${", ".join(parts)}"
+}
