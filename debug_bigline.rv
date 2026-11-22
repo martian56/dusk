@@ -1,0 +1,25 @@
+from std.env import get_env
+from std.time import now_millis
+from std.sync import sleep_millis
+from "./src/host" import PluginSpec, start_plugin, action_text
+
+fun main() {
+    let base = "tests/fake-plugin/target/raven-out/fake-plugin"
+    let bin = base + ".exe" if get_env("OS") == "Windows_NT" else base
+    let p = start_plugin(PluginSpec(name: "fake", command: bin, args: ["bigline"], activation: []), ".")
+    let end = now_millis() + 20000
+    var n = 0
+    while now_millis() < end {
+        let acts = p.poll(now_millis())
+        n += 1
+        if len(acts) > 0 or n % 25 == 0 {
+            print("poll ${n} state=${p.state} buf=${p.out.buf.length()} acts=${",".join(acts.map(a => action_text(a)))}\n")
+        }
+        if p.state != "running" {
+            break
+        }
+        sleep_millis(20)
+    }
+    print("done state=${p.state}\n")
+    p.shutdown()
+}
