@@ -51,6 +51,8 @@ fun headless(ed: Ed, script: str, w: int, h: int, screen: bool, dump: bool) {
                 let _ = ed.tick_if_due(now_millis())
                 sleep_millis(20)
             }
+            frame = Frame(Buffer.new(w, h))
+            render(ed, frame)
             continue
         }
         if ev.is_mouse {

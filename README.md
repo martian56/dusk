@@ -125,7 +125,7 @@ activation = ["startup"]      # or ["language:raven"]
 Install a plugin from git, pinned to a tag:
 
 ```
-:plugin install github.com/martian56/dusk-todo@v0.1.0
+:plugin install github.com/martian56/dusk-plugin@v0.2.0
 :plugin update todo          # to its newest tag, or todo@v0.2.0
 :plugin remove todo
 :plugin list
@@ -143,7 +143,7 @@ args = []
 activation = ["startup"]
 build = ["rvpm", "build"]     # optional, run once after cloning
 
-[windows]
+[windows]                     # command and build may differ per platform
 command = "./todo.exe"
 ```
 

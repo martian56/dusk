@@ -8,6 +8,7 @@ from "./install" import (
     update_installed,
     latest_tag,
     remove_tree,
+    split_ref,
 )
 
 let ROOT = "_dusk_install_test"
@@ -80,4 +81,14 @@ fun test_remove_deletes_the_plugin() {
     assert_eq_int(len(installed_plugins("${ROOT}/plugins")), 0)
     assert_true(remove_installed("${ROOT}/plugins", "demo").starts_with("error:"))
     let _ = remove_tree(ROOT)
+}
+
+fun test_split_ref_handles_branches_and_hosts() {
+    assert_eq_str(split_ref("github.com/a/b@v1.2.0").1, "v1.2.0")
+    assert_eq_str(split_ref("C:/src/plug@feat/ui").1, "feat/ui")
+    assert_eq_str(split_ref("C:/src/plug@feat/ui").0, "C:/src/plug")
+    assert_eq_str(split_ref("git@github.com:a/b").1, "")
+    assert_eq_str(split_ref("git@github.com:a/b@v2").1, "v2")
+    assert_eq_str(split_ref("https://me@host.com/a/b").1, "")
+    assert_eq_str(split_ref("https://me@host.com/a/b@v3").1, "v3")
 }

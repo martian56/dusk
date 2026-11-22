@@ -29,6 +29,7 @@ from "./install" import (
     remove_installed,
     update_installed,
     list_text,
+    split_ref,
 )
 from "./host" import (
     PluginSpec,
@@ -3785,17 +3786,7 @@ impl Ed {
             self.fail("unknown :plugin action ${verb}")
             return
         }
-        // A tag follows the last @ that is not part of an scp-style host.
-        var target = rest
-        var ref = ""
-        let at = rest.last_index_of("@")
-        if at > 0 and not rest.substring(at, rest.length()).contains(":") and not rest.substring(
-            at,
-            rest.length(),
-        ).contains("/") {
-            target = rest.substring(0, at)
-            ref = rest.substring(at + 1, rest.length())
-        }
+        let (target, ref) = split_ref(rest)
         if verb == "update" {
             // Windows keeps a running program's files locked.
             self.stop_plugin(target)

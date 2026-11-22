@@ -9,7 +9,7 @@
 //     activation = ["startup"]
 //     build = ["rvpm", "build"]     # optional, run in the plugin's directory
 //
-//     [windows]
+//     [windows]                     # command and build may differ per platform
 //     command = "./todo.exe"
 
 from std.fs import read, write, exists, is_dir, list_dir, create_dir_all
@@ -53,6 +53,7 @@ fun read_manifest(dir: str) -> Result[Manifest, str] {
         return Err("${MANIFEST} needs a name and a command")
     }
     let activation = t.get_strings("activation")
+    let own_build = t.get_strings("${platform}.build")
     return Ok(
         Manifest(
             name: name,
@@ -61,7 +62,7 @@ fun read_manifest(dir: str) -> Result[Manifest, str] {
             command: command,
             args: t.get_strings("args"),
             activation: activation if len(activation) > 0 else ["startup"],
-            build: t.get_strings("build"),
+            build: own_build if len(own_build) > 0 else t.get_strings("build"),
         ),
     )
 }
@@ -395,4 +396,26 @@ fun list_text(plugins_dir: str) -> str {
         parts.push("${m.name} ${m.version}${" @${ref}" if ref != "" else ""}")
     }
     return "installed: ${", ".join(parts)}"
+}
+
+// "url@ref" as (url, ref). The ref follows the last @, unless that @ is part
+// of an scp-style host (git@host:path) or a URL's user (https://me@host/...).
+fun split_ref(spec: str) -> (str, str) {
+    let at = spec.last_index_of("@")
+    if at <= 0 {
+        return (spec, "")
+    }
+    let before = spec.substring(0, at)
+    let after = spec.substring(at + 1, spec.length())
+    if after.contains(":") {
+        return (spec, "")
+    }
+    let scheme = before.index_of("://")
+    if scheme >= 0 and not before.substring(scheme + 3, before.length()).contains("/") {
+        return (spec, "")
+    }
+    if not before.contains("/") and not before.contains(":") {
+        return (spec, "")
+    }
+    return (before, after)
 }
