@@ -28,10 +28,10 @@ jobs:
       - name: Install Raven
         uses: martian56/setup-raven@v1
         with:
-          raven-version: "3.3.0"
+          raven-version: "3.3.4"
 
       - name: Build
-        run: rvpm build
+        run: rvpm build --workspace
 
       - name: Test
         run: rvpm test

@@ -1,0 +1,511 @@
+// A protocol plugin: a child process speaking JSON-RPC on stdin and stdout.
+// The host turns its messages into HostAction values for the editor to
+// apply, and never blocks: everything happens in poll().
+
+from std.json import JsonValue
+from std.process import Child, start
+from std.time import now_millis
+from std.sync import Mutex, mutex, sleep_millis
+from "./rpc" import (
+    LineReader,
+    parse_msg,
+    encode_request,
+    encode_notification,
+    encode_result,
+    encode_error,
+    obj,
+    jstr,
+    jint,
+    get_str,
+    get_int,
+)
+from "./version" import VERSION
+
+let PROTOCOL = 1
+let REQUEST_TIMEOUT_MS = 10000
+let MAX_RESTARTS = 3
+let MAX_PER_POLL = 1000
+let BUSY_PER_POLL = 200
+let BUSY_POLLS = 5
+let MAX_LOG = 500
+// Bytes waiting to be written to a plugin that is not reading its input.
+let MAX_OUTBOX = 1048576
+// Bytes of output buffered without a complete line, or read in one poll.
+let MAX_INBOX = 8388608
+
+class PluginSpec {
+    name: str
+    command: str
+    args: list[str]
+    activation: list[str]
+}
+
+class Contribution {
+    name: str
+    title: str
+}
+
+class Binding {
+    mode: str
+    keys: str
+    command: str
+}
+
+class Edit {
+    start_row: int
+    start_col: int
+    end_row: int
+    end_col: int
+    text: str
+}
+
+// The first field is always the plugin name.
+enum HostAction {
+    Message(str, str, bool),
+    Status(str, str, str),
+    Commands(str, list[Contribution]),
+    Bind(str, list[Binding]),
+    ReadText(str, int, str),
+    EditBuffer(str, int, str, int, list[Edit]),
+    OpenBuffer(str, int, str, int),
+    Failed(str, str),
+}
+
+class Pending {
+    method: str
+    sent: int
+}
+
+// Lines waiting for the writer goroutine. Writing to a pipe blocks once a
+// plugin stops reading, so the editor never writes itself.
+class Outbox {
+    lock: Mutex
+    lines: list[str] = []
+    bytes: int = 0
+    closed: bool = false
+}
+
+fun new_outbox() -> Outbox = Outbox(lock: mutex())
+
+fun write_loop(ob: Outbox, child: Child) {
+    while true {
+        ob.lock.lock()
+        let batch = ob.lines
+        ob.lines = []
+        let closed = ob.closed
+        ob.lock.unlock()
+        if len(batch) == 0 {
+            if closed {
+                return
+            }
+            sleep_millis(5)
+            continue
+        }
+        for line in batch {
+            let ok = child.write_stdin(line)
+            ob.lock.lock()
+            ob.bytes -= line.length()
+            ob.lock.unlock()
+            if not ok {
+                return
+            }
+        }
+    }
+}
+
+class PluginProc {
+    spec: PluginSpec
+    root: str
+    child: Child
+    // "running", "exited", "stopped", or "failed".
+    state: str = "running"
+    log: list[str] = []
+    restarts: int = 0
+    next_id: int = 1
+    pending: dict[int, Pending] = {}
+    queued: list[HostAction] = []
+    out: LineReader = LineReader("")
+    err: LineReader = LineReader("")
+    reported: bool = false
+    busy: int = 0
+    outbox: Outbox = new_outbox()
+}
+
+fun start_plugin(spec: PluginSpec, root: str) -> PluginProc {
+    let p = PluginProc(spec: spec, root: root, child: Child(id: 0))
+    p.launch()
+    return p
+}
+
+fun action_text(a: HostAction) -> str {
+    return match a {
+        case Message(p, t, e) { "${"error" if e else "message"}:${t}" }
+        case Status(p, id, t) { "status:${id}=${t}" }
+        case Commands(p, cs) { "commands:${",".join(cs.map(c => c.name))}" }
+        case Bind(p, bs) { "bind:${",".join(bs.map(b => "${b.mode} ${b.keys}=${b.command}"))}" }
+        case ReadText(p, id, path) { "read:${path}" }
+        case EditBuffer(p, id, path, v, es) { "edit:${path}@${v}" }
+        case OpenBuffer(p, id, path, line) { "open:${path}:${line}" }
+        case Failed(p, why) { "failed:${why}" }
+    }
+}
+
+fun json_list(v: JsonValue, key: str) -> list[JsonValue] {
+    let none: list[JsonValue] = []
+    return match v.get(key) {
+        case Some(x) {
+            match x {
+                case Array(items) { items }
+                case _ { none }
+            }
+        }
+        case None { none }
+    }
+}
+
+fun contributions(v: JsonValue) -> list[Contribution] {
+    let out: list[Contribution] = []
+    for c in json_list(v, "commands") {
+        let name = get_str(c, "name")
+        if name != "" {
+            out.push(Contribution(name: name, title: get_str(c, "title")))
+        }
+    }
+    return out
+}
+
+fun bindings(v: JsonValue) -> list[Binding] {
+    let out: list[Binding] = []
+    for b in json_list(v, "bindings") {
+        let keys = get_str(b, "keys")
+        let command = get_str(b, "command")
+        if keys != "" and command != "" {
+            let mode = get_str(b, "mode")
+            out.push(Binding(mode: mode if mode != "" else "normal", keys: keys, command: command))
+        }
+    }
+    return out
+}
+
+fun position(v: JsonValue, key: str) -> (int, int) {
+    let xs = json_list(v, key)
+    if len(xs) != 2 {
+        return (0 - 1, 0 - 1)
+    }
+    return (xs[0].as_int().unwrap_or(0 - 1), xs[1].as_int().unwrap_or(0 - 1))
+}
+
+fun edits_of(v: JsonValue) -> list[Edit] {
+    let out: list[Edit] = []
+    for e in json_list(v, "edits") {
+        let (r1, c1) = position(e, "start")
+        let (r2, c2) = position(e, "end")
+        out.push(Edit(start_row: r1, start_col: c1, end_row: r2, end_col: c2, text: get_str(e, "text")))
+    }
+    return out
+}
+
+impl PluginProc {
+    fun name(self) -> str = self.spec.name
+
+    fun alive(self) -> bool = self.child.id != 0 and self.child.running()
+
+    // Waiting on an answer from the plugin.
+    fun busy_waiting(self) -> bool = self.state == "running" and len(self.pending) > 0
+
+    fun note(self, line: str) {
+        self.log.push(line)
+        if len(self.log) > MAX_LOG {
+            let _ = self.log.remove_at(0)
+        }
+    }
+
+    fun launch(self) {
+        match start(self.spec.command, self.spec.args) {
+            case Ok(c) {
+                self.child = c
+                self.state = "running"
+                self.close_outbox()
+                self.outbox = new_outbox()
+                let ob = self.outbox
+                spawn {
+                    write_loop(ob, c)
+                }
+                self.out = LineReader("")
+                self.err = LineReader("")
+                self.busy = 0
+                let params = obj(
+                    [("protocol", jint(PROTOCOL)), ("root", jstr(self.root)), ("version", jstr(VERSION))],
+                )
+                self.request("initialize", params, now_millis())
+            }
+            case Err(e) {
+                self.state = "failed"
+                self.note("could not start ${self.spec.command}: ${e.message()}")
+                self.queued.push(
+                    HostAction.Failed(self.name(), "could not start ${self.spec.command}: ${e.message()}"),
+                )
+            }
+        }
+    }
+
+    fun send(self, line: str) {
+        if self.state != "running" {
+            return
+        }
+        let ob = self.outbox
+        ob.lock.lock()
+        let full = ob.bytes + line.length() > MAX_OUTBOX
+        if not full {
+            ob.lines.push(line)
+            ob.bytes += line.length()
+        }
+        ob.lock.unlock()
+        if full {
+            self.fail("not reading its input")
+        }
+    }
+
+    fun close_outbox(self) {
+        let ob = self.outbox
+        ob.lock.lock()
+        ob.closed = true
+        ob.lines = []
+        ob.lock.unlock()
+    }
+
+    // Relaunch an exited plugin, up to MAX_RESTARTS times. True when it
+    // restarted, so the caller can replay what the new process missed.
+    fun ensure_running(self) -> bool {
+        if self.state != "exited" {
+            return false
+        }
+        if self.restarts >= MAX_RESTARTS {
+            self.fail("exited after ${MAX_RESTARTS} restarts")
+            return false
+        }
+        self.restarts += 1
+        self.child.free()
+        self.launch()
+        return self.state == "running"
+    }
+
+    fun request(self, method: str, params: JsonValue, now_ms: int) {
+        let id = self.next_id
+        self.next_id += 1
+        self.pending.set(id, Pending(method: method, sent: now_ms))
+        self.send(encode_request(id, method, params))
+    }
+
+    fun notify(self, method: str, params: JsonValue) {
+        self.send(encode_notification(method, params))
+    }
+
+    fun respond(self, id: int, result: JsonValue) {
+        self.send(encode_result(id, result))
+    }
+
+    fun respond_error(self, id: int, message: str) {
+        self.send(encode_error(id, 0 - 32000, message))
+    }
+
+    // Run a contributed command. An exited plugin restarts first, up to
+    // MAX_RESTARTS times.
+    fun run_command(self, name: str, params: JsonValue, now_ms: int) {
+        let _ = self.ensure_running()
+        if self.state != "running" {
+            self.queued.push(HostAction.Message(self.name(), "${self.name()} is not running", true))
+            return
+        }
+        let m: dict[str, JsonValue] = {}
+        m.set("command", jstr(name))
+        match params {
+            case Object(fields) {
+                for (k, v) in fields {
+                    m.set(k, v)
+                }
+            }
+            case _ {}
+        }
+        self.request("command/run", JsonValue.Object(m), now_ms)
+    }
+
+    fun fail(self, why: str) {
+        if self.child.id != 0 and self.child.running() {
+            let _ = self.child.kill()
+        }
+        self.state = "failed"
+        self.close_outbox()
+        self.pending = {}
+        self.note("stopped: ${why}")
+        self.queued.push(HostAction.Failed(self.name(), why))
+    }
+
+    fun poll(self, now_ms: int) -> list[HostAction] {
+        let out: list[HostAction] = self.queued
+        self.queued = []
+        if self.state != "running" {
+            return out
+        }
+        for line in self.err.push(self.child.read_stderr()) {
+            self.note(line)
+        }
+        let raw = self.child.read_stdout()
+        if raw.length() + self.out.buf.length() > MAX_INBOX {
+            self.fail("flooding")
+            for a in self.queued {
+                out.push(a)
+            }
+            self.queued = []
+            return out
+        }
+        let lines = self.out.push(raw)
+        if len(lines) > MAX_PER_POLL {
+            self.fail("flooding")
+            for a in self.queued {
+                out.push(a)
+            }
+            self.queued = []
+            return out
+        }
+        self.busy = self.busy + 1 if len(lines) > BUSY_PER_POLL else 0
+        for line in lines {
+            self.handle(line, out)
+        }
+        if self.busy >= BUSY_POLLS {
+            self.fail("flooding")
+        }
+        if self.state == "running" {
+            match self.child.poll() {
+                case Some(code) { self.exited(code, out) }
+                case None {}
+            }
+        }
+        if self.state == "running" {
+            for id in self.pending.keys() {
+                let p = self.pending.get(id).unwrap()
+                if now_ms - p.sent > REQUEST_TIMEOUT_MS {
+                    let _ = self.pending.remove(id)
+                    out.push(HostAction.Message(self.name(), "${self.name()}: ${p.method} timed out", true))
+                }
+            }
+        }
+        for a in self.queued {
+            out.push(a)
+        }
+        self.queued = []
+        return out
+    }
+
+    fun exited(self, code: int, out: list[HostAction]) {
+        // Whatever the process wrote before exiting still counts.
+        for line in self.out.push(self.child.read_stdout()) {
+            self.handle(line, out)
+        }
+        for line in self.err.push(self.child.read_stderr()) {
+            self.note(line)
+        }
+        for id in self.pending.keys() {
+            let p = self.pending.get(id).unwrap()
+            if p.method != "initialize" {
+                out.push(
+                    HostAction.Message(self.name(), "${self.name()}: ${p.method} failed: plugin exited", true),
+                )
+            }
+        }
+        self.pending = {}
+        self.close_outbox()
+        self.note("exited with code ${code}")
+        if self.restarts >= MAX_RESTARTS {
+            self.state = "failed"
+            out.push(HostAction.Failed(self.name(), "exited ${code} after ${MAX_RESTARTS} restarts"))
+            return
+        }
+        self.state = "exited"
+        out.push(HostAction.Message(self.name(), "${self.name()} exited with code ${code}", true))
+    }
+
+    fun handle(self, line: str, out: list[HostAction]) {
+        let m = parse_msg(line)
+        let me = self.name()
+        if m.kind == "invalid" {
+            self.note("protocol error: ${m.error}: ${line}")
+            if not self.reported {
+                self.reported = true
+                out.push(HostAction.Message(me, "${me}: protocol error (see :plugin log ${me})", true))
+            }
+            return
+        }
+        if m.kind == "response" {
+            match self.pending.get(m.id) {
+                case Some(p) {
+                    let _ = self.pending.remove(m.id)
+                    if m.error != "" {
+                        out.push(HostAction.Message(me, "${me}: ${m.error}", true))
+                    } else if p.method == "initialize" {
+                        out.push(HostAction.Commands(me, contributions(m.result)))
+                        out.push(HostAction.Bind(me, bindings(m.result)))
+                    }
+                }
+                case None { self.note("response to unknown request ${m.id}") }
+            }
+            return
+        }
+        let params = m.params
+        if m.kind == "notification" {
+            if m.method == "ui/message" {
+                let is_error = match params.get("error") {
+                    case Some(v) { v.as_bool().unwrap_or(false) }
+                    case None { false }
+                }
+                out.push(HostAction.Message(me, get_str(params, "text"), is_error))
+            } else if m.method == "status/set" {
+                out.push(HostAction.Status(me, get_str(params, "id"), get_str(params, "text")))
+            } else if m.method == "commands/register" {
+                out.push(HostAction.Commands(me, contributions(params)))
+            } else if m.method == "keys/bind" {
+                out.push(HostAction.Bind(me, bindings(params)))
+            } else {
+                self.note("unknown notification ${m.method}")
+            }
+            return
+        }
+        if m.method == "buffer/text" {
+            out.push(HostAction.ReadText(me, m.id, get_str(params, "path")))
+        } else if m.method == "buffer/edit" {
+            out.push(
+                HostAction.EditBuffer(
+                    me,
+                    m.id,
+                    get_str(params, "path"),
+                    get_int(params, "version", 0 - 1),
+                    edits_of(params),
+                ),
+            )
+        } else if m.method == "buffer/open" {
+            out.push(HostAction.OpenBuffer(me, m.id, get_str(params, "path"), get_int(params, "line", 1)))
+        } else {
+            self.note("unknown request ${m.method}")
+            self.respond_error(m.id, "unknown method ${m.method}")
+        }
+    }
+
+    // Ask the plugin to exit, give it a moment, then make sure it is gone.
+    fun shutdown(self) {
+        if self.state == "running" {
+            self.request("shutdown", obj([]), now_millis())
+            let end = now_millis() + 500
+            while now_millis() < end and self.child.running() {
+                sleep_millis(10)
+            }
+        }
+        if self.child.id != 0 {
+            if self.child.running() {
+                let _ = self.child.kill()
+            }
+        }
+        self.state = "stopped"
+        self.close_outbox()
+        self.pending = {}
+    }
+}

@@ -1,0 +1,35 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true
+from "./rpc" import LineReader, parse_msg, encode_request, obj, jstr, get_str
+
+fun test_reader_joins_partial_lines() {
+    let r = LineReader("")
+    assert_eq_int(len(r.push("{\"a\":")), 0)
+    let lines = r.push("1}\n{\"b\":2}\r\n{\"c\"")
+    assert_eq_int(len(lines), 2)
+    assert_eq_str(lines[0], "{\"a\":1}")
+    assert_eq_str(lines[1], "{\"b\":2}")
+    assert_eq_str(r.buf, "{\"c\"")
+}
+
+fun test_parse_kinds() {
+    assert_eq_str(
+        parse_msg("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"x\",\"params\":{}}").kind,
+        "request",
+    )
+    assert_eq_str(parse_msg("{\"jsonrpc\":\"2.0\",\"method\":\"x\"}").kind, "notification")
+    let r = parse_msg("{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-1,\"message\":\"no\"}}")
+    assert_eq_str(r.kind, "response")
+    assert_eq_str(r.error, "no")
+    assert_eq_int(r.id, 3)
+    assert_eq_str(parse_msg("not json").kind, "invalid")
+    assert_eq_str(parse_msg("[1,2]").kind, "invalid")
+}
+
+fun test_encode_round_trip() {
+    let line = encode_request(7, "buffer/text", obj([("path", jstr("a.rv"))]))
+    assert_true(line.ends_with("\n"))
+    let m = parse_msg(line.trim())
+    assert_eq_int(m.id, 7)
+    assert_eq_str(m.method, "buffer/text")
+    assert_eq_str(get_str(m.params, "path"), "a.rv")
+}

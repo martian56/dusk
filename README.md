@@ -102,6 +102,31 @@ Placeholders in `command` and `args`: `{file}`, `{dir}`, `{line}`, `{col}`,
 `{word}`, `{lang}`. Run one from `:plugin.sort`, from the palette, from its
 key, or on a visual selection with `:'<,'>plugin.sort`.
 
+### Protocol plugins
+
+A protocol plugin is a program that keeps running beside dusk and talks to it
+over JSON-RPC on stdin and stdout. It hears about opened, changed, saved, and
+closed files, and it can add commands and key bindings, read and edit buffers,
+open files, show messages, and put items in the status line. Write one in any
+language; in Raven, the [dusk-plugin](https://github.com/martian56/dusk-plugin)
+package does the protocol for you.
+
+```toml
+[[plugin]]
+name = "wordcount"
+command = "wordcount"
+protocol = true
+activation = ["startup"]      # or ["language:raven"]
+```
+
+A protocol plugin's commands show up in the palette and in `:plugins`, and its
+key bindings never override yours or dusk's. A plugin that crashes is
+restarted the next time you use it (three times at most), one that floods
+output is stopped, and one that does not answer within 10 seconds times out;
+none of these freeze the editor. `:plugin log <name>` shows what it wrote to
+stderr and what dusk noticed about it. The messages are described in
+[docs/protocol.md](docs/protocol.md).
+
 ## Languages
 
 ```toml

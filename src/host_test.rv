@@ -1,0 +1,153 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from std.env import get_env
+from std.time import now_millis
+from std.sync import sleep_millis
+from "./rpc" import obj, jstr
+from "./host" import PluginSpec, PluginProc, HostAction, start_plugin, action_text
+
+fun fake_binary() -> str {
+    let base = "tests/fake-plugin/target/raven-out/fake-plugin"
+    return base + ".exe" if get_env("OS") == "Windows_NT" else base
+}
+
+fun fake(mode: str) -> PluginSpec {
+    return PluginSpec(name: "fake", command: fake_binary(), args: [mode], activation: ["startup"])
+}
+
+// Poll for up to `ms`, collecting every action as text; stops early once one
+// contains `want`.
+fun pump(p: PluginProc, ms: int, want: str) -> list[str] {
+    let out: list[str] = []
+    let end = now_millis() + ms
+    while now_millis() < end {
+        for a in p.poll(now_millis()) {
+            out.push(action_text(a))
+        }
+        if want != "" and out.any(t => t.contains(want)) {
+            return out
+        }
+        sleep_millis(20)
+    }
+    return out
+}
+
+fun has(lines: list[str], want: str) -> bool = lines.any(t => t.contains(want))
+
+fun count(lines: list[str], want: str) -> int = lines.count(t => t.contains(want))
+
+fun test_initialize_yields_contributions() {
+    let p = start_plugin(fake("echo"), ".")
+    let got = pump(p, 5000, "bind:")
+    assert_true(has(got, "commands:fake.hello"))
+    assert_true(has(got, "bind:normal g h=fake.hello"))
+    p.shutdown()
+}
+
+fun test_command_emits_message_and_status() {
+    let p = start_plugin(fake("echo"), ".")
+    let _ = pump(p, 5000, "bind:")
+    p.run_command("fake.hello", obj([]), now_millis())
+    let got = pump(p, 5000, "status:fake=said hello")
+    assert_true(has(got, "message:hello from fake"))
+    assert_true(has(got, "status:fake=said hello"))
+    p.shutdown()
+}
+
+fun test_missing_binary_fails_once() {
+    let spec = PluginSpec(
+        name: "ghost",
+        command: "no-such-plugin-binary",
+        args: [],
+        activation: ["startup"],
+    )
+    let p = start_plugin(spec, ".")
+    var got = pump(p, 300, "")
+    p.run_command("ghost.x", obj([]), now_millis())
+    for t in pump(p, 300, "") {
+        got.push(t)
+    }
+    assert_eq_int(count(got, "failed:"), 1)
+    assert_eq_int(p.restarts, 0)
+    assert_eq_str(p.state, "failed")
+}
+
+fun test_crash_restarts_on_next_use_then_fails() {
+    let p = start_plugin(fake("crash"), ".")
+    let first = pump(p, 5000, "exited with code 3")
+    assert_eq_int(count(first, "exited with code 3"), 1)
+    assert_eq_str(p.state, "exited")
+    for i in range(3) {
+        p.run_command("fake.hello", obj([]), now_millis())
+        let _ = pump(p, 5000, "exited")
+        assert_eq_int(p.restarts, i + 1)
+    }
+    p.run_command("fake.hello", obj([]), now_millis())
+    let _ = pump(p, 300, "")
+    assert_eq_str(p.state, "failed")
+    assert_eq_int(p.restarts, 3)
+}
+
+fun test_exit_during_command_reports_failure() {
+    let p = start_plugin(fake("crash"), ".")
+    p.run_command("fake.hello", obj([]), now_millis())
+    let got = pump(p, 5000, "command/run failed: plugin exited")
+    assert_true(has(got, "command/run failed: plugin exited"))
+}
+
+fun test_flood_is_stopped() {
+    let p = start_plugin(fake("flood"), ".")
+    let got = pump(p, 10000, "failed:")
+    assert_true(has(got, "failed:flooding"))
+    assert_eq_str(p.state, "failed")
+}
+
+fun test_garbage_line_reported_once_then_works() {
+    let p = start_plugin(fake("garbage"), ".")
+    let got = pump(p, 5000, "protocol error")
+    assert_eq_int(count(got, "protocol error"), 1)
+    p.run_command("fake.hello", obj([]), now_millis())
+    let later = pump(p, 5000, "hello from fake")
+    assert_true(has(later, "message:hello from fake"))
+    assert_true(p.log.any(l => l.contains("this is not json")))
+    p.shutdown()
+}
+
+fun test_silent_request_times_out() {
+    let p = start_plugin(fake("silent"), ".")
+    let t = now_millis()
+    p.run_command("fake.hello", obj([]), t)
+    let got: list[str] = []
+    for a in p.poll(t + 10001) {
+        got.push(action_text(a))
+    }
+    assert_true(has(got, "command/run timed out"))
+    p.shutdown()
+}
+
+fun test_shutdown_stops_the_process() {
+    let p = start_plugin(fake("echo"), ".")
+    let _ = pump(p, 5000, "bind:")
+    p.shutdown()
+    assert_eq_str(p.state, "stopped")
+    assert_false(p.alive())
+}
+
+fun test_deaf_plugin_never_blocks_dusk() {
+    let p = start_plugin(fake("deaf"), ".")
+    let _ = pump(p, 5000, "bind:")
+    let big = obj([("text", jstr("y" * 1024))])
+    let t = now_millis()
+    for i in range(3000) {
+        p.notify("buffer/changed", big)
+    }
+    assert_true(now_millis() - t < 2000)
+    let got = pump(p, 5000, "failed:")
+    assert_true(has(got, "failed:not reading its input"))
+    assert_eq_str(p.state, "failed")
+}
+
+fun test_huge_line_is_stopped() {
+    let p = start_plugin(fake("bigline"), ".")
+    let got = pump(p, 10000, "failed:")
+    assert_true(has(got, "failed:flooding"))
+}

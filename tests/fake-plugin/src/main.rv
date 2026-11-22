@@ -1,0 +1,212 @@
+// A scripted protocol plugin for dusk's host tests.
+//
+//     fake-plugin echo|record|crash|flood|silent|garbage|deaf|bigline
+//
+// record behaves as echo and also lists every notification it received in
+// the status item "seen".
+
+from std.env import args, exit
+from std.sync import sleep_millis
+from std.io import read_line, print
+from std.json import JsonValue, parse, stringify, json_int, json_string, json_object, json_array
+
+fun obj(pairs: list[(str, JsonValue)]) -> JsonValue {
+    let m: dict[str, JsonValue] = {}
+    for (k, v) in pairs {
+        m.set(k, v)
+    }
+    return json_object(m)
+}
+
+fun s(x: str) -> JsonValue = json_string(x)
+
+fun send(pairs: list[(str, JsonValue)]) {
+    let all: list[(str, JsonValue)] = [("jsonrpc", s("2.0"))]
+    for p in pairs {
+        all.push(p)
+    }
+    print(stringify(obj(all)) + "\n")
+}
+
+fun notify(method: str, params: JsonValue) {
+    send([("method", s(method)), ("params", params)])
+}
+
+fun reply(id: int, result: JsonValue) {
+    send([("id", json_int(id)), ("result", result)])
+}
+
+fun str_of(v: JsonValue, key: str) -> str {
+    return match v.get(key) {
+        case Some(x) { x.as_string().unwrap_or("") }
+        case None { "" }
+    }
+}
+
+fun int_of(v: JsonValue, key: str) -> int {
+    return match v.get(key) {
+        case Some(x) { x.as_int().unwrap_or(0 - 1) }
+        case None { 0 - 1 }
+    }
+}
+
+fun contributions() -> JsonValue {
+    let cmds: list[JsonValue] = []
+    for (n, t) in [
+        ("fake.hello", "Say hello"),
+        ("fake.edit", "Insert X"),
+        ("fake.count", "Count chars"),
+        ("fake.die", "Exit"),
+    ] {
+        cmds.push(obj([("name", s(n)), ("title", s(t))]))
+    }
+    let binds = [obj([("mode", s("normal")), ("keys", s("g h")), ("command", s("fake.hello"))])]
+    return obj(
+        [("name", s("fake")), ("commands", json_array(cmds)), ("bindings", json_array(binds))],
+    )
+}
+
+class State {
+    next_id: int = 1000
+    // request id -> (purpose, id of the dusk request to answer, or -1)
+    pending: dict[int, (str, int)] = {}
+    record: bool = false
+    seen: list[str] = []
+}
+
+fun ask(st: State, method: str, params: JsonValue, purpose: str, answer: int) {
+    let id = st.next_id
+    st.next_id += 1
+    st.pending.set(id, (purpose, answer))
+    send([("id", json_int(id)), ("method", s(method)), ("params", params)])
+}
+
+fun count_chars(text: str) -> int {
+    var n = 0
+    for c in text.chars() {
+        if c != "\n" {
+            n += 1
+        }
+    }
+    return n
+}
+
+fun handle(st: State, line: str) -> bool {
+    let v = match parse(line) {
+        case Ok(x) { x }
+        case Err(e) {
+            return true
+        }
+    }
+    let method = str_of(v, "method")
+    let id = int_of(v, "id")
+    let params = v.get("params").unwrap_or(JsonValue.Null)
+    if st.record and method != "" and id < 0 {
+        st.seen.push(method)
+        notify("status/set", obj([("id", s("seen")), ("text", s(",".join(st.seen)))]))
+    }
+    if method == "" {
+        match st.pending.get(id) {
+            case Some(p) {
+                let (purpose, answer) = p
+                let _ = st.pending.remove(id)
+                let res = v.get("result").unwrap_or(JsonValue.Null)
+                if purpose == "count" {
+                    notify(
+                        "status/set",
+                        obj([("id", s("chars")), ("text", s("chars: ${count_chars(str_of(res, "text"))}"))]),
+                    )
+                }
+                if answer >= 0 {
+                    reply(answer, obj([]))
+                }
+            }
+            case None {}
+        }
+        return true
+    }
+    if method == "initialize" {
+        reply(id, contributions())
+    } else if method == "shutdown" {
+        reply(id, obj([]))
+        return false
+    } else if method == "buffer/opened" or method == "buffer/changed" {
+        ask(st, "buffer/text", obj([("path", s(str_of(params, "path")))]), "count", 0 - 1)
+    } else if method == "command/run" {
+        let cmd = str_of(params, "command")
+        if cmd == "fake.hello" {
+            notify("ui/message", obj([("text", s("hello from fake"))]))
+            notify("status/set", obj([("id", s("fake")), ("text", s("said hello"))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.edit" {
+            let at = json_array([json_int(0), json_int(0)])
+            let edit = obj([("start", at), ("end", at), ("text", s("X"))])
+            let p = obj(
+                [
+                    ("path", s(str_of(params, "path"))),
+                    ("version", json_int(int_of(params, "version"))),
+                    ("edits", json_array([edit])),
+                ],
+            )
+            ask(st, "buffer/edit", p, "edit", id)
+        } else if cmd == "fake.die" {
+            exit(4)
+        } else if cmd == "fake.count" {
+            ask(st, "buffer/text", obj([("path", s(str_of(params, "path")))]), "count", id)
+        } else {
+            send(
+                [
+                    ("id", json_int(id)),
+                    ("error", obj([("code", json_int(0 - 32601)), ("message", s("no command ${cmd}"))])),
+                ],
+            )
+        }
+    }
+    return true
+}
+
+fun main() {
+    let a = args()
+    let mode = a[1] if len(a) > 1 else "echo"
+    let st = State(record: mode == "record")
+    var started = false
+    while true {
+        let line = read_line()
+        if line == "" {
+            return
+        }
+        if mode == "silent" {
+            continue
+        }
+        if not started {
+            started = true
+            let keep = handle(st, line)
+            if mode == "crash" {
+                exit(3)
+            }
+            if mode == "flood" {
+                for i in range(200000) {
+                    notify("ui/message", obj([("text", s("flood ${i}"))]))
+                }
+            }
+            if mode == "deaf" or mode == "bigline" {
+                if mode == "bigline" {
+                    print("x" * 9000000)
+                }
+                while true {
+                    sleep_millis(1000)
+                }
+            }
+            if mode == "garbage" {
+                print("this is not json\n")
+            }
+            if not keep {
+                return
+            }
+            continue
+        }
+        if not handle(st, line) {
+            return
+        }
+    }
+}

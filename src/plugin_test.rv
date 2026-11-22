@@ -1,0 +1,285 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from std.env import get_env
+from std.fs import write, remove_file
+from std.time import now_millis
+from std.sync import sleep_millis
+from "github.com/martian56/plumage" import Frame
+from "github.com/martian56/plumage/buffer" import Buffer
+from "./config" import Config, Plugin
+from "./editor" import Ed, new_editor_with, edit_error
+from "./host" import Edit, Contribution, HostAction
+from "./keys" import parse_script
+from "./view" import render
+
+fun fake_binary() -> str {
+    let base = "tests/fake-plugin/target/raven-out/fake-plugin"
+    return base + ".exe" if get_env("OS") == "Windows_NT" else base
+}
+
+fun fake_plugin(mode: str, activation: list[str]) -> Plugin {
+    return Plugin(
+        name: "fake",
+        command: fake_binary(),
+        args: [mode],
+        input: "none",
+        output: "message",
+        key: "",
+        on: "",
+        description: "",
+        protocol: true,
+        activation: activation,
+    )
+}
+
+fun editor(mode: str, paths: list[str]) -> Ed {
+    let cfg = Config(plugins: [fake_plugin(mode, ["startup"])])
+    return new_editor_with(paths, cfg)
+}
+
+fun wait_for(ed: Ed, ms: int, pred: fun(Ed) -> bool) -> bool {
+    let end = now_millis() + ms
+    while now_millis() < end {
+        ed.plugin_tick(now_millis())
+        if pred(ed) {
+            return true
+        }
+        sleep_millis(20)
+    }
+    return false
+}
+
+fun ready(ed: Ed) -> bool = wait_for(ed, 5000, e => e.plug.commands.has("fake.hello"))
+
+fun keys(ed: Ed, script: str) {
+    for ev in parse_script(script) {
+        ed.handle_mouse(ev.mouse) if ev.is_mouse else ed.handle_key(ev.key)
+    }
+}
+
+fun status_line(ed: Ed) -> str {
+    let f = Frame(Buffer.new(120, 10))
+    render(ed, f)
+    return f.buf.row_text(8)
+}
+
+fun test_plugin_command_runs_from_palette() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    assert_true(ed.command_names().any(c => c.starts_with("fake.hello")))
+    ed.run("fake.hello", 1)
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_plugin_binding_runs_command() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    keys(ed, "gh")
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_status_item_is_shown() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.hello", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.status.has("fake/fake")))
+    assert_true(status_line(ed).contains("said hello"))
+    ed.shutdown_plugins()
+}
+
+fun test_user_binding_wins() {
+    let user: dict[str, str] = {}
+    user.set("g h", "file_start")
+    let table: dict[str, dict[str, str]] = {}
+    table.set("normal", user)
+    let cfg = Config(plugins: [fake_plugin("echo", ["startup"])], keys: table)
+    let ed = new_editor_with([], cfg)
+    let _ = ed.doc().insert_at(0, 0, "a\nb\nc")
+    ed.doc().row = 2
+    assert_true(ready(ed))
+    keys(ed, "gh")
+    assert_eq_int(ed.doc().row, 0)
+    assert_false(wait_for(ed, 300, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_action_plugins_unchanged() {
+    let echo = Plugin(
+        name: "hi",
+        command: "cmd" if get_env("OS") == "Windows_NT" else "sh",
+        args: ["/c", "echo hi"] if get_env("OS") == "Windows_NT" else ["-c", "echo hi"],
+        input: "none",
+        output: "message",
+        key: "",
+        on: "",
+        description: "",
+    )
+    let ed = new_editor_with([], Config(plugins: [echo]))
+    ed.ex("plugin.hi")
+    assert_eq_str(ed.message, "hi: hi")
+    assert_eq_int(len(ed.plug.hosts), 0)
+}
+
+fun test_language_activation_waits_for_a_file() {
+    let cfg = Config(plugins: [fake_plugin("echo", ["language:raven"])])
+    let ed = new_editor_with([], cfg)
+    assert_eq_int(len(ed.plug.hosts), 0)
+    write("_dusk_lang_test.rv", "fun main() {}\n")
+    ed.open("_dusk_lang_test.rv")
+    assert_eq_int(len(ed.plug.hosts), 1)
+    assert_true(ready(ed))
+    ed.shutdown_plugins()
+    let _ = remove_file("_dusk_lang_test.rv")
+}
+
+fun with_file(name: str, body: str) -> str {
+    write(name, body)
+    return name
+}
+
+fun chars_status(ed: Ed) -> str = ed.plug.status.get("fake/chars").unwrap_or("")
+
+fun test_opening_a_file_updates_char_status() {
+    let f = with_file("_dusk_open_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 5"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_edits_notify_and_recount() {
+    let f = with_file("_dusk_edit_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 5"))
+    keys(ed, "Aab<esc>")
+    assert_true(wait_for(ed, 5000, e => chars_status(e) == "chars: 7"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_plugin_edit_applies_and_undoes() {
+    let f = with_file("_dusk_pedit_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.edit", 1)
+    assert_true(wait_for(ed, 5000, e => e.doc().lines[0] == "Xhello"))
+    keys(ed, "u")
+    assert_eq_str(ed.doc().lines[0], "hello")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_stale_edit_is_rejected() {
+    let f = with_file("_dusk_stale_test.txt", "hello\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.edit", 1)
+    let _ = ed.doc().insert_at(0, 5, "!")
+    assert_true(wait_for(ed, 5000, e => e.message.contains("stale version")))
+    assert_eq_str(ed.doc().lines[0], "hello!")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_save_and_close_send_events() {
+    let a = with_file("_dusk_ev_a.txt", "a\n")
+    let b = with_file("_dusk_ev_b.txt", "b\n")
+    let ed = editor("record", [a, b])
+    assert_true(ready(ed))
+    ed.ex("w")
+    ed.ex("bdelete")
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => e.plug.status.get("fake/seen").unwrap_or("").contains("buffer/closed"),
+        ),
+    )
+    let seen = ed.plug.status.get("fake/seen").unwrap_or("")
+    assert_true(seen.contains("buffer/opened"))
+    assert_true(seen.contains("buffer/saved"))
+    ed.shutdown_plugins()
+    let _ = remove_file(a)
+    let _ = remove_file(b)
+}
+
+fun test_plugin_log_opens_a_buffer() {
+    let ed = editor("garbage", [])
+    assert_true(wait_for(ed, 5000, e => e.message.contains("protocol error")))
+    ed.ex("plugin log fake")
+    assert_true(ed.doc().text().contains("this is not json"))
+    ed.ex("plugin log nobody")
+    assert_true(ed.message.contains("no plugin nobody"))
+    ed.shutdown_plugins()
+}
+
+fun test_plugin_command_runs_from_ex() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.ex("fake.hello")
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun edit(r1: int, c1: int, r2: int, c2: int, text: str) -> Edit {
+    return Edit(start_row: r1, start_col: c1, end_row: r2, end_col: c2, text: text)
+}
+
+fun test_overlapping_and_out_of_range_edits_are_refused() {
+    let ed = new_editor_with([], Config())
+    let _ = ed.doc().insert_at(0, 0, "a\nb\nc")
+    let d = ed.doc()
+    assert_true(edit_error(d, [edit(0, 0, 2, 0, ""), edit(1, 0, 2, 0, "")]).contains("overlap"))
+    assert_true(edit_error(d, [edit(5, 0, 5, 0, "x")]) != "")
+    assert_true(edit_error(d, [edit(0, 1, 0, 0, "x")]) != "")
+    assert_eq_str(edit_error(d, [edit(2, 0, 2, 1, "z"), edit(0, 0, 0, 1, "y")]), "")
+}
+
+fun test_plugin_cannot_take_builtin_or_foreign_names() {
+    let ed = new_editor_with([], Config())
+    let cs = [
+        Contribution(name: "save", title: ""),
+        Contribution(name: "other.x", title: ""),
+        Contribution(name: "fake.ok", title: ""),
+    ]
+    ed.apply_action(HostAction.Commands("fake", cs))
+    assert_true(ed.plug.commands.has("fake.ok"))
+    assert_false(ed.plug.commands.has("save"))
+    assert_false(ed.plug.commands.has("other.x"))
+}
+
+fun test_startup_and_language_start_once() {
+    write("_dusk_once_test.rv", "fun main() {}\n")
+    let cfg = Config(plugins: [fake_plugin("echo", ["startup", "language:raven"])])
+    let ed = new_editor_with(["_dusk_once_test.rv"], cfg)
+    assert_eq_int(len(ed.plug.hosts), 1)
+    ed.shutdown_plugins()
+    let _ = remove_file("_dusk_once_test.rv")
+}
+
+fun test_restart_replays_open_buffers() {
+    let f = with_file("_dusk_restart_test.txt", "hi\n")
+    let ed = editor("record", [f])
+    assert_true(ready(ed))
+    ed.run("fake.die", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.hosts[0].state == "exited"))
+    let _ = ed.plug.status.remove("fake/seen")
+    ed.run("fake.hello", 1)
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => e.plug.status.get("fake/seen").unwrap_or("").contains("buffer/opened"),
+        ),
+    )
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_tick_if_due_is_rate_limited() {
+    let ed = new_editor_with([], Config())
+    assert_true(ed.tick_if_due(1000))
+    assert_false(ed.tick_if_due(1020))
+    assert_true(ed.tick_if_due(1060))
+}
