@@ -107,7 +107,10 @@ key, or on a visual selection with `:'<,'>plugin.sort`.
 A protocol plugin is a program that keeps running beside dusk and talks to it
 over JSON-RPC on stdin and stdout. It hears about opened, changed, saved, and
 closed files, and it can add commands and key bindings, read and edit buffers,
-open files, show messages, and put items in the status line. Write one in any
+open files, show messages, and put items in the status line. It can also show
+UI that dusk draws: docked panels with markdown, lists, text inputs, buttons,
+and progress; pickers and prompts; and marks in the gutter such as
+diagnostics. F6 moves focus between the editor and panels. Write one in any
 language; in Raven, the [dusk-plugin](https://github.com/martian56/dusk-plugin)
 package does the protocol for you.
 
