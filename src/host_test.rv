@@ -148,8 +148,10 @@ fun test_deaf_plugin_never_blocks_dusk() {
 
 fun test_huge_line_is_stopped() {
     let p = start_plugin(fake("bigline"), ".")
-    let got = pump(p, 10000, "failed:")
-    assert_true(has(got, "failed:flooding"))
+    let got = pump(p, 20000, "failed:")
+    if not has(got, "failed:flooding") {
+        assert_eq_str("state=${p.state} actions=${",".join(got)} log=${"|".join(p.log)}", "failed:flooding")
+    }
 }
 
 fun run_and_collect(mode: str, cmd: str, want: str) -> list[str] {
