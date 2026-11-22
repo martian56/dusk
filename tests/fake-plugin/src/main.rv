@@ -7,6 +7,7 @@
 
 from std.env import args, exit
 from std.sync import sleep_millis
+from std.fs import write
 from std.io import read_line, print
 from std.json import JsonValue, parse, stringify, json_int, json_string, json_object, json_array
 
@@ -107,6 +108,7 @@ fun contributions() -> JsonValue {
         ("fake.prompt", "Ask for text"),
         ("fake.marks", "Mark row 0"),
         ("fake.close", "Close the panel"),
+        ("fake.touch", "Change the file on disk"),
     ] {
         cmds.push(obj([("name", s(n)), ("title", s(t))]))
     }
@@ -239,6 +241,11 @@ fun handle(st: State, line: str) -> bool {
             )
             let far = obj([("row", json_int(999)), ("severity", s("warning")), ("message", s("far"))])
             notify("marks/set", obj([("path", s(str_of(params, "path"))), ("marks", json_array([m, far]))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.touch" {
+            let path = str_of(params, "path")
+            let _ = write(path, "changed on disk\n")
+            notify("files/changed", obj([("paths", json_array([s(path)]))]))
             reply(id, obj([]))
         } else if cmd == "fake.die" {
             exit(4)

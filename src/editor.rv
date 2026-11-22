@@ -3563,6 +3563,11 @@ impl Ed {
                 }
                 self.plug.marks.get(path).unwrap().set(p, ms.filter(m => m.row >= 0))
             }
+            case FilesChanged(p, paths) {
+                for path in paths {
+                    self.file_changed(p, path)
+                }
+            }
             case Pick(p, id, title, items) {
                 match from {
                     case Some(h) {
@@ -3668,6 +3673,42 @@ impl Ed {
             }
         }
         return best
+    }
+
+    // A plugin changed `path` on disk: reload an open buffer that has no
+    // unsaved edits (one undo step brings the old text back), and warn about
+    // one that does.
+    fun file_changed(self, plugin: str, path: str) {
+        let p = path.replace("\\", "/")
+        if p == "" {
+            return
+        }
+        for d in self.docs {
+            if d.path != p {
+                continue
+            }
+            let disk = match read(p) {
+                case Ok(t) { t.replace("\r\n", "\n") }
+                case Err(e) {
+                    return
+                }
+            }
+            if disk == d.text() {
+                return
+            }
+            if d.dirty {
+                self.fail("${p} changed on disk (by ${plugin}); :e reloads it and drops your edits")
+                return
+            }
+            let fresh = open_doc(p, d.lang)
+            d.checkpoint()
+            d.lines = fresh.lines
+            d.clamp()
+            d.touched(0)
+            d.dirty = false
+            self.say("reloaded ${p}, changed by ${plugin}")
+            return
+        }
     }
 
     fun has_marks(self, path: str) -> bool {

@@ -139,6 +139,7 @@ moves the cursor there. Result: `{}`.
 | `status/set` | `{"id", "text"}` | Sets a status line item; empty text removes it |
 | `commands/register` | `{"commands"}` | Adds commands, as in `initialize` |
 | `keys/bind` | `{"bindings"}` | Adds key bindings, as in `initialize` |
+| `files/changed` | `{"paths"}` | The plugin changed these files on disk: an open buffer without unsaved edits reloads (one undo brings the old text back); one with unsaved edits stays and dusk says so |
 
 ## UI
 

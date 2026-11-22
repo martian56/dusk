@@ -74,6 +74,7 @@ enum HostAction {
     Pick(str, int, str, list[(str, str)]),
     Prompt(str, int, str, str),
     Marks(str, str, list[Mark]),
+    FilesChanged(str, list[str]),
 }
 
 let BLOCK_KINDS = ["text", "list", "input", "buttons", "progress"]
@@ -185,6 +186,7 @@ fun action_text(a: HostAction) -> str {
         case Pick(p, id, title, items) { "pick:${title}:${len(items)}" }
         case Prompt(p, id, title, initial) { "prompt:${title}" }
         case Marks(p, path, ms) { "marks:${path}:${len(ms)}" }
+        case FilesChanged(p, paths) { "changed:${",".join(paths)}" }
     }
 }
 
@@ -572,6 +574,12 @@ impl PluginProc {
                 out.push(HostAction.Commands(me, contributions(params)))
             } else if m.method == "keys/bind" {
                 out.push(HostAction.Bind(me, bindings(params)))
+            } else if m.method == "files/changed" {
+                let paths: list[str] = []
+                for x in json_list(params, "paths") {
+                    paths.push(x.as_string().unwrap_or(""))
+                }
+                out.push(HostAction.FilesChanged(me, paths))
             } else if m.method == "ui/panel" {
                 out.push(HostAction.Panel(me, panel_of(params, self.log)))
             } else if m.method == "ui/close" {

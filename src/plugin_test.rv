@@ -601,3 +601,28 @@ fun test_marks_leave_line_numbers_whole() {
     assert_true(rows.any(r => r.contains(" 104  x")))
     let _ = remove_file(f)
 }
+
+fun test_files_changed_reloads_a_clean_buffer() {
+    let f = with_file("_dusk_touch_clean.txt", "before\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.touch", 1)
+    assert_true(wait_for(ed, 5000, e => e.doc().lines[0] == "changed on disk"))
+    assert_false(ed.doc().dirty)
+    keys(ed, "u")
+    assert_eq_str(ed.doc().lines[0], "before")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_files_changed_keeps_unsaved_edits() {
+    let f = with_file("_dusk_touch_dirty.txt", "before\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    keys(ed, "Amine<esc>")
+    ed.run("fake.touch", 1)
+    assert_true(wait_for(ed, 5000, e => e.message.contains("changed on disk")))
+    assert_eq_str(ed.doc().lines[0], "beforemine")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
