@@ -165,6 +165,7 @@ class PluginProc {
     reported: bool = false
     busy: int = 0
     outbox: Outbox = new_outbox()
+    started: int = 0
 }
 
 fun start_plugin(spec: PluginSpec, root: str) -> PluginProc {
@@ -322,6 +323,7 @@ impl PluginProc {
             case Ok(c) {
                 self.child = c
                 self.state = "running"
+                self.started = now_millis()
                 self.close_outbox()
                 self.outbox = new_outbox()
                 let ob = self.outbox
@@ -527,6 +529,10 @@ impl PluginProc {
         self.pending = {}
         self.close_outbox()
         self.note("exited with code ${code}")
+        // A plugin that ran a good while before exiting gets its restarts back.
+        if now_millis() - self.started > 60000 {
+            self.restarts = 0
+        }
         if self.restarts >= MAX_RESTARTS {
             self.state = "failed"
             out.push(HostAction.Failed(self.name(), "exited ${code} after ${MAX_RESTARTS} restarts"))
@@ -615,6 +621,26 @@ impl PluginProc {
             self.note("unknown request ${m.method}")
             self.respond_error(m.id, "unknown method ${m.method}")
         }
+    }
+
+    // Ask the plugin to exit without waiting; finish_shutdown ends it.
+    fun request_shutdown(self) {
+        if self.state == "running" {
+            self.request("shutdown", obj([]), now_millis())
+        }
+    }
+
+    // Wait until `end_ms` for the plugin to exit, then end it.
+    fun finish_shutdown(self, end_ms: int) {
+        while now_millis() < end_ms and self.child.id != 0 and self.child.running() {
+            sleep_millis(10)
+        }
+        if self.child.id != 0 and self.child.running() {
+            let _ = self.child.kill()
+        }
+        self.state = "stopped"
+        self.close_outbox()
+        self.pending = {}
     }
 
     // Ask the plugin to exit, give it a moment, then make sure it is gone.

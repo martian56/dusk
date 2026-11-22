@@ -1,7 +1,7 @@
 // An open file: its lines, cursor, scroll, undo history, and highlight cache.
 // Positions are (row, col) with col counted in characters, not bytes.
 
-from std.fs import read, write, exists
+from std.fs import read, write, exists, modified
 
 class Snap {
     lines: list[str]
@@ -32,6 +32,8 @@ class Doc {
     // The file's text as dusk last read or wrote it, to tell whether
     // something else changed it since.
     disk: str = ""
+    // The file's modification time when dusk last read or wrote it.
+    mtime: int = 0 - 1
 }
 
 fun clen(s: str) -> int = len(s.chars())
@@ -66,6 +68,7 @@ fun open_doc(path: str, lang: int) -> Doc {
     var lines: list[str] = [""]
     var crlf = false
     var disk = ""
+    let stamp = modified(path) if path != "" else 0 - 1
     if path != "" and exists(path) {
         match read(path) {
             case Ok(text) {
@@ -80,7 +83,7 @@ fun open_doc(path: str, lang: int) -> Doc {
             case Err(_) {}
         }
     }
-    return Doc(path: path, lines: lines, lang: lang, crlf: crlf, disk: disk)
+    return Doc(path: path, lines: lines, lang: lang, crlf: crlf, disk: disk, mtime: stamp)
 }
 
 impl Doc {
@@ -100,6 +103,7 @@ impl Doc {
             case Ok(_) {
                 self.dirty = false
                 self.disk = body
+                self.mtime = modified(self.path)
                 Ok(true)
             }
             case Err(e) { Err(e.message()) }

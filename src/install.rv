@@ -13,8 +13,8 @@
 //     command = "./todo.exe"
 
 from std.fs import read, write, exists, is_dir, list_dir, create_dir_all
-from std.env import os_name
-from std.process import run, Output
+from std.env import os_name, set_env, unset_env, has_env, get_env
+from std.process import run, run_in, Output
 from std.json import JsonValue, parse as parse_json, stringify, json_object, json_string
 from "github.com/martian56/raven-toml" import parse, Toml
 from "./config" import Plugin
@@ -115,8 +115,17 @@ fun git_args(args: list[str]) -> list[str] {
 }
 
 fun git(args: list[str]) -> Result[Output, str] {
-    let g = git_args(args)
-    let r = run("cmd", ["/d", "/c", "set", "GIT_TERMINAL_PROMPT=0&&", "git"].concat(g)) if os_name() == "windows" else run("sh", ["-c", "GIT_TERMINAL_PROMPT=0 exec git \"$@\"", "sh"].concat(g))
+    // Never wait on a credential or host-key question nobody can answer,
+    // and put the variable back so later programs can still prompt.
+    let had = has_env("GIT_TERMINAL_PROMPT")
+    let old = get_env("GIT_TERMINAL_PROMPT")
+    let _ = set_env("GIT_TERMINAL_PROMPT", "0")
+    let r = run("git", git_args(args))
+    if had {
+        let _ = set_env("GIT_TERMINAL_PROMPT", old)
+    } else {
+        let _ = unset_env("GIT_TERMINAL_PROMPT")
+    }
     return match r {
         case Ok(o) { Ok(o) }
         case Err(e) { Err("git failed to start: ${e.message}") }
@@ -156,14 +165,16 @@ fun move_tree(from: str, to: str) -> str {
 }
 
 // Run the manifest's build command inside `dir`, each argument passed as is.
+// On Windows it goes through cmd, so npm.cmd and other scripts resolve.
 fun build_in(dir: str, build: list[str]) -> str {
     if len(build) == 0 {
         return ""
     }
-    if os_name() == "windows" {
-        return run_ok("cmd", ["/d", "/c", "cd", "/d", native(dir), "&&"].concat(build))
+    let r = run_in(dir, "cmd", ["/d", "/c"].concat(build)) if os_name() == "windows" else run_in(dir, build[0], build.slice(1, len(build)))
+    return match r {
+        case Ok(o) { "" if o.code == 0 else output_error(build[0], o) }
+        case Err(e) { "${build[0]} failed to start: ${e.message}" }
     }
-    return run_ok("sh", ["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", dir].concat(build))
 }
 
 fun lock_json(source: str, ref: str, version: str) -> str {

@@ -54,9 +54,24 @@ fun parse_msg(line: str) -> RpcMsg {
             return invalid("not an object")
         }
     }
-    let id = match v.get("id") {
-        case Some(x) { x.as_int().unwrap_or(0 - 1) }
-        case None { 0 - 1 }
+    var id = 0 - 1
+    match v.get("id") {
+        case Some(x) {
+            match x {
+                case Null {}
+                case _ {
+                    match x.as_int() {
+                        case Some(n) {
+                            id = n
+                        }
+                        case None {
+                            return invalid("ids must be numbers")
+                        }
+                    }
+                }
+            }
+        }
+        case None {}
     }
     let method = get_str(v, "method")
     let params = v.get("params").unwrap_or(JsonValue.Null)
@@ -68,6 +83,9 @@ fun parse_msg(line: str) -> RpcMsg {
     }
     match v.get("error") {
         case Some(e) {
+            if e.is_null() {
+                return RpcMsg("response", id, "", JsonValue.Null, v.get("result").unwrap_or(JsonValue.Null), "")
+            }
             let msg = get_str(e, "message")
             return RpcMsg(
                 "response",

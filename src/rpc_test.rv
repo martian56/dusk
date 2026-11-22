@@ -33,3 +33,13 @@ fun test_encode_round_trip() {
     assert_eq_str(m.method, "buffer/text")
     assert_eq_str(get_str(m.params, "path"), "a.rv")
 }
+
+fun test_null_error_is_success_and_string_ids_are_invalid() {
+    let ok = parse_msg("{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{},\"error\":null}")
+    assert_eq_str(ok.kind, "response")
+    assert_eq_str(ok.error, "")
+    assert_eq_str(
+        parse_msg("{\"jsonrpc\":\"2.0\",\"id\":\"a1\",\"method\":\"buffer/text\",\"params\":{}}").kind,
+        "invalid",
+    )
+}
