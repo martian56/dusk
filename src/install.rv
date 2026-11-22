@@ -106,6 +106,30 @@ fun run_ok(program: str, args: list[str]) -> str {
     }
 }
 
+fun git_args(args: list[str]) -> list[str] {
+    let out = ["-c", "credential.interactive=never", "-c", "core.sshCommand=ssh -o BatchMode=yes"]
+    for a in args {
+        out.push(a)
+    }
+    return out
+}
+
+fun git(args: list[str]) -> Result[Output, str] {
+    let g = git_args(args)
+    let r = run("cmd", ["/d", "/c", "set", "GIT_TERMINAL_PROMPT=0&&", "git"].concat(g)) if os_name() == "windows" else run("sh", ["-c", "GIT_TERMINAL_PROMPT=0 exec git \"$@\"", "sh"].concat(g))
+    return match r {
+        case Ok(o) { Ok(o) }
+        case Err(e) { Err("git failed to start: ${e.message}") }
+    }
+}
+
+fun git_ok(args: list[str]) -> str {
+    return match git(args) {
+        case Ok(o) { "" if o.code == 0 else output_error("git", o) }
+        case Err(e) { e }
+    }
+}
+
 fun native(path: str) -> str = path.replace("/", "\\") if os_name() == "windows" else path
 
 // Remove a directory tree. git leaves read-only pack files on Windows, so
@@ -131,23 +155,15 @@ fun move_tree(from: str, to: str) -> str {
     return "" if exists(to) and not exists(from) else "could not move ${from} to ${to}"
 }
 
-fun shell_quote(s: str) -> str {
-    if not s.contains(" ") and not s.contains("\"") {
-        return s
-    }
-    return "\"" + s.replace("\"", "\\\"") + "\""
-}
-
-// Run the manifest's build command inside `dir`.
+// Run the manifest's build command inside `dir`, each argument passed as is.
 fun build_in(dir: str, build: list[str]) -> str {
     if len(build) == 0 {
         return ""
     }
-    let line = " ".join(build.map(a => shell_quote(a)))
     if os_name() == "windows" {
-        return run_ok("cmd", ["/d", "/c", "cd /d ${shell_quote(native(dir))} && ${line}"])
+        return run_ok("cmd", ["/d", "/c", "cd", "/d", native(dir), "&&"].concat(build))
     }
-    return run_ok("sh", ["-c", "cd ${shell_quote(dir)} && ${line}"])
+    return run_ok("sh", ["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", dir].concat(build))
 }
 
 fun lock_json(source: str, ref: str, version: str) -> str {
@@ -175,65 +191,98 @@ fun lock_field(dir: str, key: str) -> str {
     }
 }
 
+fun valid_name(name: str) -> bool {
+    if name == "" or name.starts_with(".") {
+        return false
+    }
+    for c in name.chars() {
+        let ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "-" or c == "_" or c == "."
+        if not ok {
+            return false
+        }
+    }
+    return not name.contains("..")
+}
+
+// A cloned, built plugin waiting to be swapped into place.
+class Staged {
+    dir: str
+    manifest: Manifest
+    source: str
+}
+
 // Clone `url` at `ref` (a tag or branch, "" for the default branch) into a
-// staging directory, check its manifest, build it, then swap it into place.
-// The previous copy stays until the new one is in place.
-fun install_into(plugins_dir: str, url: str, ref: str) -> str {
+// staging directory, check its manifest, and build it. Slow, so the editor
+// runs it on a goroutine.
+fun stage(plugins_dir: str, url: str, ref: str) -> Result[Staged, str] {
     let u = url.trim()
     if u == "" {
-        return "error: install needs a git URL"
+        return Err("install needs a git URL")
     }
-    let name = dir_name_from_url(u)
-    if name == "" or name.starts_with(".") or name.contains("..") {
-        return "error: cannot name a plugin directory after ${u}"
+    let base = dir_name_from_url(u)
+    if not valid_name(base) {
+        return Err("cannot name a staging directory after ${u}")
     }
     let _ = create_dir_all("${plugins_dir}/.staging")
-    let staging = "${plugins_dir}/.staging/${name}"
-    let backup = "${plugins_dir}/.staging/${name}.old"
-    let target = "${plugins_dir}/${name}"
+    let staging = "${plugins_dir}/.staging/${base}"
     let _ = remove_tree(staging)
-    let _ = remove_tree(backup)
     let args = ["clone", "-q", "--depth", "1"]
     if ref.trim() != "" {
         args.push("--branch")
         args.push(ref.trim())
     }
+    args.push("--")
     args.push(normalize_url(u))
     args.push(staging)
-    let cloned = run_ok("git", args)
+    let cloned = git_ok(args)
     if cloned != "" {
         let _ = remove_tree(staging)
-        return "error: ${cloned}"
+        return Err(cloned)
     }
     let m = match read_manifest(staging) {
         case Ok(x) { x }
         case Err(e) {
             let _ = remove_tree(staging)
-            return "error: ${u} has ${e}"
+            return Err("${u} has ${e}")
         }
+    }
+    if not valid_name(m.name) {
+        let _ = remove_tree(staging)
+        return Err("${MANIFEST} names the plugin ${m.name}; use letters, digits, - _ and .")
     }
     let built = build_in(staging, m.build)
     if built != "" {
         let _ = remove_tree(staging)
-        return "error: building ${m.name} failed: ${built}"
+        return Err("building ${m.name} failed: ${built}")
     }
     match write("${staging}/${LOCK}", lock_json(u, ref.trim(), m.version)) {
         case Ok(ok) {}
         case Err(e) {
             let _ = remove_tree(staging)
-            return "error: could not write ${LOCK}: ${e.message()}"
+            return Err("could not write ${LOCK}: ${e.message()}")
         }
     }
+    return Ok(Staged(dir: staging, manifest: m, source: u))
+}
+
+// Move a staged plugin to plugins/<name>, keeping the previous copy until
+// the new one is in place. The plugin must not be running.
+fun swap(plugins_dir: str, st: Staged) -> str {
+    let m = st.manifest
+    let target = "${plugins_dir}/${m.name}"
+    let backup = "${plugins_dir}/.staging/${m.name}.old"
+    let _ = remove_tree(backup)
     let had = exists(target)
     if had {
         let moved = move_tree(target, backup)
         if moved != "" {
-            let _ = remove_tree(staging)
+            let _ = remove_tree(st.dir)
             return "error: could not replace ${m.name}: ${moved}"
         }
     }
-    let swapped = move_tree(staging, target)
+    let swapped = move_tree(st.dir, target)
     if swapped != "" {
+        let _ = remove_tree(st.dir)
         if had {
             let _ = move_tree(backup, target)
         }
@@ -241,7 +290,14 @@ fun install_into(plugins_dir: str, url: str, ref: str) -> str {
     }
     let _ = remove_tree(backup)
     let v = m.version if m.version != "" else "unversioned"
-    return "installed ${m.name} ${v} from ${u}"
+    return "installed ${m.name} ${v} from ${st.source}"
+}
+
+fun install_into(plugins_dir: str, url: str, ref: str) -> str {
+    return match stage(plugins_dir, url, ref) {
+        case Ok(st) { swap(plugins_dir, st) }
+        case Err(e) { "error: ${e}" }
+    }
 }
 
 fun resolve_command(dir: str, command: str) -> str {
@@ -296,6 +352,7 @@ fun installed_plugins(plugins_dir: str) -> list[Plugin] {
                 description: m.description,
                 protocol: true,
                 activation: m.activation,
+                installed: true,
             ),
         )
     }
@@ -348,7 +405,7 @@ fun newer(a: list[int], b: list[int]) -> bool {
 
 // The highest version tag of a repository, "" when it has none.
 fun latest_tag(url: str) -> str {
-    let o = match run("git", ["ls-remote", "--tags", "--refs", normalize_url(url)]) {
+    let o = match git(["ls-remote", "--tags", "--refs", "--", normalize_url(url)]) {
         case Ok(x) { x }
         case Err(e) {
             return ""
@@ -371,18 +428,25 @@ fun latest_tag(url: str) -> str {
     return best
 }
 
-// Reinstall from the recorded source at `ref`, or at its newest tag.
-fun update_installed(plugins_dir: str, name: str, ref: str) -> str {
+// Stage a reinstall from the recorded source at `ref`, or its newest tag.
+fun stage_update(plugins_dir: str, name: str, ref: str) -> Result[Staged, str] {
     let dir = dir_of(plugins_dir, name)
     if dir == "" {
-        return "error: no installed plugin ${name}"
+        return Err("no installed plugin ${name}")
     }
     let source = lock_field(dir, "source")
     if source == "" {
-        return "error: ${name} has no recorded source; install it again"
+        return Err("${name} has no recorded source; install it again")
     }
     let want = ref if ref != "" else latest_tag(source)
-    return install_into(plugins_dir, source, want)
+    return stage(plugins_dir, source, want)
+}
+
+fun update_installed(plugins_dir: str, name: str, ref: str) -> str {
+    return match stage_update(plugins_dir, name, ref) {
+        case Ok(st) { swap(plugins_dir, st) }
+        case Err(e) { "error: ${e}" }
+    }
 }
 
 fun list_text(plugins_dir: str) -> str {

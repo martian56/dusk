@@ -98,3 +98,29 @@ fun test_long_list_layout_is_bounded() {
     assert_true(len(rows) <= 20)
     assert_true(rows[0].text.starts_with("row 5000"))
 }
+
+fun test_replaced_panel_follows_the_bottom() {
+    let p = new_panel(
+        "fake",
+        spec(
+            [
+                Block(id: "t", kind: "text", text: "a\n\nb\n\nc\n\nd\n\ne"),
+                Block(id: "ask", kind: "input"),
+            ],
+        ),
+    )
+    p.scroll = 1000
+    let first = layout(p, 30, 4, 0)
+    assert_eq_str(first[len(first) - 1].kind, "input")
+    let q = replace_panel(
+        p,
+        spec(
+            [
+                Block(id: "t", kind: "text", text: "a\n\nb\n\nc\n\nd\n\ne\n\nf\n\ng\n\nh"),
+                Block(id: "ask", kind: "input"),
+            ],
+        ),
+    )
+    let rows = layout(q, 30, 4, 0)
+    assert_eq_str(rows[len(rows) - 1].kind, "input")
+}

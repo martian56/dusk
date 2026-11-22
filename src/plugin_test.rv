@@ -656,3 +656,79 @@ fun test_plugin_install_and_remove_from_the_editor() {
     assert_eq_int(len(ed.plug.hosts), 0)
     let _ = remove_tree(root)
 }
+
+fun test_files_changed_ignores_identical_text() {
+    let f = with_file("_dusk_same.txt", "no newline")
+    let ed = new_editor_with([f], Config())
+    let undo = len(ed.doc().undo)
+    ed.apply_action(HostAction.FilesChanged("rook", [f]))
+    assert_eq_int(len(ed.doc().undo), undo)
+    assert_false(ed.message.contains("reloaded"))
+    keys(ed, "Ax<esc>")
+    ed.say("")
+    write("_dusk_other.txt", "y\n")
+    ed.apply_action(HostAction.FilesChanged("rook", [f]))
+    assert_false(ed.message.contains("changed on disk"))
+    let _ = remove_file(f)
+    let _ = remove_file("_dusk_other.txt")
+}
+
+fun test_ask_opens_from_a_focused_panel() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<cr>")
+    assert_true(last_event(ed, "picked a"))
+    ed.shutdown_plugins()
+}
+
+fun test_visual_selection_reaches_a_plugin_command_from_ex() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let _ = ed.doc().insert_at(0, 0, "alpha\nbeta")
+    keys(ed, "Vj:fake.sel<cr>")
+    assert_true(wait_for(ed, 5000, e => e.message.starts_with("sel ")))
+    assert_true(ed.message.contains("alpha") and ed.message.contains("beta"))
+    ed.shutdown_plugins()
+}
+
+fun fake_repo(root: str) {
+    let _ = remove_tree(root)
+    let _ = create_dir_all("${root}/src")
+    let _ = run("git", ["init", "-q", "${root}/src"])
+    let bin = "../../../" + fake_binary()
+    write(
+        "${root}/src/dusk-plugin.toml",
+        "name = \"fake\"\nversion = \"0.1.0\"\ncommand = \"${bin}\"\nargs = [\"echo\"]\n",
+    )
+    let id = ["-C", "${root}/src", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    let _ = run("git", id.concat(["add", "."]))
+    let _ = run("git", id.concat(["commit", "-q", "-m", "first"]))
+    let _ = run("git", id.concat(["tag", "v0.1.0"]))
+}
+
+fun test_config_plugin_wins_and_survives_failed_updates() {
+    let root = "_dusk_ed_config"
+    fake_repo(root)
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.plug.install_root = "${root}/plugins"
+    ed.ex("plugin update fake@v0.1.0")
+    assert_true(ed.message.contains("no installed plugin fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.ex("plugin remove fake")
+    assert_true(ed.message.contains("no installed plugin fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.ex("plugin install ./${root}/src@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.message.contains("runs instead")))
+    assert_eq_int(len(ed.plug.hosts), 1)
+    assert_eq_str(ed.plug.hosts[0].spec.command, fake_binary())
+    ed.ex("plugin update fake@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.message.contains("runs instead")))
+    ed.ex("plugin remove fake")
+    assert_true(ed.message.contains("removed fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.shutdown_plugins()
+    let _ = remove_tree(root)
+}

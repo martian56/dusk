@@ -109,6 +109,7 @@ fun contributions() -> JsonValue {
         ("fake.marks", "Mark row 0"),
         ("fake.close", "Close the panel"),
         ("fake.touch", "Change the file on disk"),
+        ("fake.sel", "Echo the selection"),
     ] {
         cmds.push(obj([("name", s(n)), ("title", s(t))]))
     }
@@ -241,6 +242,9 @@ fun handle(st: State, line: str) -> bool {
             )
             let far = obj([("row", json_int(999)), ("severity", s("warning")), ("message", s("far"))])
             notify("marks/set", obj([("path", s(str_of(params, "path"))), ("marks", json_array([m, far]))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.sel" {
+            notify("ui/message", obj([("text", s("sel ${str_of(params, "selection")}"))]))
             reply(id, obj([]))
         } else if cmd == "fake.touch" {
             let path = str_of(params, "path")

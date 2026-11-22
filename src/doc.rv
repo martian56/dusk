@@ -29,6 +29,9 @@ class Doc {
     // Bumped on every change, so a plugin edit made against an older text
     // can be refused.
     version: int = 0
+    // The file's text as dusk last read or wrote it, to tell whether
+    // something else changed it since.
+    disk: str = ""
 }
 
 fun clen(s: str) -> int = len(s.chars())
@@ -62,9 +65,11 @@ fun split_lines(text: str) -> list[str] {
 fun open_doc(path: str, lang: int) -> Doc {
     var lines: list[str] = [""]
     var crlf = false
+    var disk = ""
     if path != "" and exists(path) {
         match read(path) {
             case Ok(text) {
+                disk = text
                 crlf = text.contains("\r\n")
                 lines = split_lines(text.replace("\r\n", "\n"))
                 // A trailing newline is not an extra empty line.
@@ -75,7 +80,7 @@ fun open_doc(path: str, lang: int) -> Doc {
             case Err(_) {}
         }
     }
-    return Doc(path: path, lines: lines, lang: lang, crlf: crlf)
+    return Doc(path: path, lines: lines, lang: lang, crlf: crlf, disk: disk)
 }
 
 impl Doc {
@@ -94,6 +99,7 @@ impl Doc {
         return match write(self.path, body) {
             case Ok(_) {
                 self.dirty = false
+                self.disk = body
                 Ok(true)
             }
             case Err(e) { Err(e.message()) }

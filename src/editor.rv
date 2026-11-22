@@ -24,10 +24,13 @@ from "./ui" import (
 )
 from std.sync import Mutex, mutex
 from "./install" import (
-    install_into,
+    Staged,
+    stage,
+    stage_update,
+    swap,
+    dir_of,
     installed_plugins,
     remove_installed,
-    update_installed,
     list_text,
     split_ref,
 )
@@ -127,15 +130,22 @@ class Ed {
 // editor. The tick applies the result.
 class Job {
     lock: Mutex
-    name: str
     done: bool = false
-    result: str = ""
+    staged: Option[Staged] = None
+    error: str = ""
 }
 
-fun run_install(job: Job, dir: str, url: str, ref: str, update: bool) {
-    let r = update_installed(dir, url, ref) if update else install_into(dir, url, ref)
+fun run_stage(job: Job, dir: str, target: str, ref: str, update: bool) {
+    let r = stage_update(dir, target, ref) if update else stage(dir, target, ref)
     job.lock.lock()
-    job.result = r
+    match r {
+        case Ok(st) {
+            job.staged = Some(st)
+        }
+        case Err(e) {
+            job.error = e
+        }
+    }
     job.done = true
     job.lock.unlock()
 }
@@ -1938,7 +1948,9 @@ impl Ed {
         }
         // A plugin run from `:'<,'>` reads the selection, so the visual
         // mode it was started from stays until the plugin has run.
-        let from_visual = cmd.starts_with("plugin.") and (self.prompt_mode_before == "visual" or self.prompt_mode_before == "vline")
+        let first = cmd.substring(0, cmd.index_of(" ")) if cmd.index_of(" ") >= 0 else cmd
+        let names_plugin = cmd.starts_with("plugin.") or self.plug.commands.has(first)
+        let from_visual = names_plugin and (self.prompt_mode_before == "visual" or self.prompt_mode_before == "vline")
         self.mode = self.prompt_mode_before if from_visual else "normal"
         match cmd.parse_int() {
             case Some(n) {
@@ -3651,8 +3663,12 @@ impl Ed {
                 self.answer_ask(JsonValue.Null)
             }
         }
-        if self.plug.asking or len(self.plug.asks) == 0 or self.mode != "normal" {
+        if self.plug.asking or len(self.plug.asks) == 0 or (self.mode != "normal" and self.mode != "panel") {
             return
+        }
+        if self.mode == "panel" {
+            self.focus_panel(0 - 1)
+            self.mode = "normal"
         }
         let a = self.plug.asks[0]
         self.plug.asking = true
@@ -3731,21 +3747,29 @@ impl Ed {
                 continue
             }
             let disk = match read(p) {
-                case Ok(t) { t.replace("\r\n", "\n") }
+                case Ok(t) { t }
                 case Err(e) {
                     return
                 }
             }
-            if disk == d.text() {
+            if disk == d.disk {
                 return
             }
             if d.dirty {
+                d.disk = disk
                 self.fail("${p} changed on disk (by ${plugin}); :e reloads it and drops your edits")
                 return
             }
             let fresh = open_doc(p, d.lang)
+            if fresh.lines.len() == d.lines.len() and "\n".join(fresh.lines) == "\n".join(d.lines) {
+                d.disk = disk
+                d.crlf = fresh.crlf
+                return
+            }
             d.checkpoint()
             d.lines = fresh.lines
+            d.crlf = fresh.crlf
+            d.disk = disk
             d.clamp()
             d.touched(0)
             d.dirty = false
@@ -3761,8 +3785,9 @@ impl Ed {
         let sp = arg.index_of(" ")
         let verb = arg.substring(0, sp) if sp >= 0 else arg
         let rest = arg.substring(sp + 1, arg.length()).trim() if sp >= 0 else ""
+        let dir = self.plugins_dir()
         if verb == "list" {
-            self.say(list_text(self.plugins_dir()))
+            self.say(list_text(dir))
             return
         }
         if rest == "" {
@@ -3772,34 +3797,60 @@ impl Ed {
             return
         }
         if verb == "remove" {
-            self.stop_plugin(rest)
-            let msg = remove_installed(self.plugins_dir(), rest)
+            if dir_of(dir, rest) == "" {
+                self.fail("no installed plugin ${rest}")
+                return
+            }
+            let mine = self.config_owns(rest)
+            if not mine {
+                self.stop_plugin(rest)
+            }
+            let msg = remove_installed(dir, rest)
             if msg.starts_with("error:") {
                 self.fail(msg)
-            } else {
-                self.cfg.plugins = self.cfg.plugins.filter(p => p.name != rest)
-                self.say(msg)
+                return
             }
+            if not mine {
+                self.cfg.plugins = self.cfg.plugins.filter(p => p.name != rest)
+            }
+            self.say(msg)
             return
         }
         if verb != "install" and verb != "update" {
             self.fail("unknown :plugin action ${verb}")
             return
         }
-        let (target, ref) = split_ref(rest)
+        var target = rest
+        var ref = ""
         if verb == "update" {
-            // Windows keeps a running program's files locked.
-            self.stop_plugin(target)
+            // A name never holds an @, so the last one starts the ref.
+            let at = rest.last_index_of("@")
+            if at > 0 {
+                target = rest.substring(0, at)
+                ref = rest.substring(at + 1, rest.length())
+            }
+            if dir_of(dir, target) == "" {
+                self.fail("no installed plugin ${target}")
+                return
+            }
+        } else {
+            let (t, r) = split_ref(rest)
+            target = t
+            ref = r
         }
-        let job = Job(lock: mutex(), name: target)
+        let job = Job(lock: mutex())
         self.plug.jobs.push(job)
-        let dir = self.plugins_dir()
         let update = verb == "update"
         spawn {
-            run_install(job, dir, target, ref, update)
+            run_stage(job, dir, target, ref, update)
         }
-        self.say("${verb if verb == "update" else "installing"} ${target}...")
+        self.say("${"updating" if update else "installing"} ${target}...")
     }
+
+    // A [[plugin]] in the config by this name, which wins over an installed one.
+    fun config_owns(self, name: str) -> bool = self.cfg.plugins.any(
+        p => p.name == name and not p.installed,
+    )
 
     // Shut a plugin down and forget its commands and UI.
     fun stop_plugin(self, name: str) {
@@ -3821,36 +3872,61 @@ impl Ed {
         }
     }
 
+    // A staged install is ready: stop the running copy (Windows locks its
+    // files), swap the new one in, and start it, unless the config's own
+    // [[plugin]] of that name is the one that runs.
     fun finish_jobs(self) {
         let waiting: list[Job] = []
         for job in self.plug.jobs {
             job.lock.lock()
             let done = job.done
-            let result = job.result
+            let staged = job.staged
+            let error = job.error
             job.lock.unlock()
             if not done {
                 waiting.push(job)
                 continue
             }
-            if result.starts_with("error:") {
-                self.fail(result)
-                continue
+            match staged {
+                case Some(st) { self.apply_staged(st) }
+                case None { self.fail("error: ${error}") }
             }
-            // Take the freshly installed copy and start it.
-            for p in installed_plugins(self.plugins_dir()) {
-                if result.starts_with("installed ${p.name} ") {
-                    self.stop_plugin(p.name)
-                    self.cfg.plugins = self.cfg.plugins.filter(q => q.name != p.name)
-                    self.cfg.plugins.push(p)
-                    if p.activation.contains("startup") {
-                        self.start_host(p)
-                    }
-                }
-            }
-            self.activate_for_language()
-            self.say(result)
         }
         self.plug.jobs = waiting
+    }
+
+    fun apply_staged(self, st: Staged) {
+        let name = st.manifest.name
+        let mine = self.config_owns(name)
+        let was_running = not mine and self.host_named(name).is_some()
+        if not mine {
+            self.stop_plugin(name)
+        }
+        let msg = swap(self.plugins_dir(), st)
+        if msg.starts_with("error:") {
+            self.fail(msg)
+            if was_running {
+                for p in self.cfg.plugins.filter(q => q.name == name) {
+                    self.start_host(p)
+                }
+            }
+            return
+        }
+        if mine {
+            self.say("${msg}; your config's [[plugin]] ${name} runs instead")
+            return
+        }
+        for p in installed_plugins(self.plugins_dir()) {
+            if p.name == name {
+                self.cfg.plugins = self.cfg.plugins.filter(q => q.name != name)
+                self.cfg.plugins.push(p)
+                if p.activation.contains("startup") {
+                    self.start_host(p)
+                }
+            }
+        }
+        self.activate_for_language()
+        self.say(msg)
     }
 
     fun has_marks(self, path: str) -> bool {
@@ -3983,7 +4059,8 @@ impl Ed {
         }
         let ev = panel_key(p, name, typed)
         let (w, h) = self.panel_size(i)
-        if has_selection(p) {
+        let typing = in_input and (typed != "" or name == "backspace" or name == "enter" or name == "ctrl+n")
+        if has_selection(p) or typing {
             keep_in_view(p, w, h)
         }
         if ev.kind != "" {

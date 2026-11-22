@@ -24,6 +24,8 @@ class Plugin {
     protocol: bool = false
     // When a protocol plugin starts: "startup" or "language:<name>".
     activation: list[str] = ["startup"]
+    // Installed with :plugin install rather than written in the config.
+    installed: bool = false
 }
 
 class Config {

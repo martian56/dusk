@@ -50,7 +50,7 @@ fun test_install_pins_a_tag_and_lists_the_plugin() {
     let p = ps[0]
     assert_eq_str(p.name, "demo")
     assert_true(p.protocol)
-    assert_true(p.command.ends_with("${ROOT}/plugins/src/run-demo"))
+    assert_true(p.command.ends_with("${ROOT}/plugins/demo/run-demo"))
     assert_eq_str(",".join(p.args), "--fast")
     assert_eq_str(",".join(p.activation), "language:raven")
 }
@@ -91,4 +91,34 @@ fun test_split_ref_handles_branches_and_hosts() {
     assert_eq_str(split_ref("git@github.com:a/b@v2").1, "v2")
     assert_eq_str(split_ref("https://me@host.com/a/b").1, "")
     assert_eq_str(split_ref("https://me@host.com/a/b@v3").1, "v3")
+}
+
+fun test_plugins_are_named_by_their_manifest() {
+    make_repo()
+    let _ = create_dir_all("${ROOT}/other/src")
+    let _ = run("git", ["init", "-q", "${ROOT}/other/src"])
+    write(
+        "${ROOT}/other/src/dusk-plugin.toml",
+        "name = \"second\"\nversion = \"1.0.0\"\ncommand = \"x\"\n",
+    )
+    let id = ["-C", "${ROOT}/other/src", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    let _ = run("git", id.concat(["add", "."]))
+    let _ = run("git", id.concat(["commit", "-q", "-m", "one"]))
+    let _ = install_into("${ROOT}/plugins", "./${ROOT}/src", "")
+    let _ = install_into("${ROOT}/plugins", "./${ROOT}/other/src", "")
+    let names = installed_plugins("${ROOT}/plugins").map(p => p.name)
+    assert_eq_str(",".join(names), "demo,second")
+}
+
+fun test_build_runs_in_the_plugin_directory() {
+    make_repo()
+    write(
+        "${ROOT}/src/dusk-plugin.toml",
+        "name = \"demo\"\nversion = \"0.3.0\"\ncommand = \"./x\"\nbuild = [\"git\", \"init\", \"-q\", \"built marker\"]\n",
+    )
+    git(["commit", "-q", "-am", "build"])
+    let msg = install_into("${ROOT}/plugins", "./${ROOT}/src", "")
+    assert_true(msg.starts_with("installed demo"))
+    assert_true(exists("${ROOT}/plugins/demo/built marker"))
+    let _ = remove_tree(ROOT)
 }

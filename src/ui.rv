@@ -23,6 +23,8 @@ class PanelState {
     // Rendered markdown per block id, reused while the text and width hold.
     cache: dict[str, Rendered] = {}
     renders: int = 0
+    // Scrolled to the end at the last layout, so new content stays in view.
+    at_bottom: bool = true
 }
 
 class Rendered {
@@ -81,7 +83,7 @@ fun new_panel(owner: str, spec: PanelSpec) -> PanelState {
 // range, and input the plugin did not overwrite all carry over.
 fun replace_panel(old: PanelState, spec: PanelSpec) -> PanelState {
     let p = new_panel(old.owner, spec)
-    p.scroll = old.scroll
+    p.scroll = 1000000000 if old.at_bottom else old.scroll
     p.cache = old.cache
     var focused_id = ""
     if old.focus_block >= 0 and old.focus_block < len(old.spec.blocks) {
@@ -250,7 +252,9 @@ fun total_height(p: PanelState, w: int) -> int {
 }
 
 fun layout(p: PanelState, w: int, h: int, tick: int) -> list[Row] {
-    p.scroll = max(0, min(p.scroll, total_height(p, w) - h))
+    let total = total_height(p, w)
+    p.scroll = max(0, min(p.scroll, total - h))
+    p.at_bottom = p.scroll >= total - h
     let out: list[Row] = []
     var y = 0
     for bi in range(len(p.spec.blocks)) {
