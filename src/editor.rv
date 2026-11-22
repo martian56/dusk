@@ -96,6 +96,17 @@ class Ed {
     dragging: bool = false
 }
 
+// A pick or prompt a plugin asked for, answered on the process that asked.
+class Ask {
+    host: PluginProc
+    id: int
+    // "pick" or "prompt".
+    kind: str
+    title: str
+    items: list[(str, str)]
+    initial: str
+}
+
 // Protocol plugin state, kept apart from Ed's own fields.
 class Plugins {
     hosts: list[PluginProc] = []
@@ -116,6 +127,9 @@ class Plugins {
     // Screen rectangle (x, y, w, h) of each panel from the last frame.
     rects: list[(int, int, int, int)] = []
     frame: int = 0
+    // Waiting picks and prompts; the first is on screen when `asking`.
+    asks: list[Ask] = []
+    asking: bool = false
 }
 
 let CHANGES = [
@@ -1188,7 +1202,9 @@ impl Ed {
     }
 
     fun filter_picker(self) {
-        self.picker_shown = fuzzy_filter(self.prompt, self.picker_items, 500)
+        // A plugin's list keeps its own order until the user types.
+        let keep = self.picker_kind == "plugin" and self.prompt == ""
+        self.picker_shown = self.picker_items.copy() if keep else fuzzy_filter(self.prompt, self.picker_items, 500)
         self.picker_sel = min(self.picker_sel, max(0, len(self.picker_shown) - 1))
     }
 
@@ -1221,6 +1237,8 @@ impl Ed {
                 let col = self.doc().lines[max(0, min(r, len(self.doc().lines) - 1))].index_of(self.search)
                 self.go(r, max(0, col))
             }
+        } else if kind == "plugin" {
+            self.answer_ask(JsonValue.Str(item))
         } else if kind == "themes" {
             self.set_theme(item)
         } else if kind == "languages" {
@@ -2685,7 +2703,9 @@ impl Ed {
             case Enter {
                 let text = self.prompt
                 self.mode = "normal"
-                if kind == "command" {
+                if kind == "plugin" {
+                    self.answer_ask(JsonValue.Str(text))
+                } else if kind == "command" {
                     self.ex(text)
                 } else if kind == "search" {
                     if text != "" {
@@ -3402,6 +3422,7 @@ impl Ed {
                 self.apply_from(Some(h), a)
             }
         }
+        self.update_asks()
     }
 
     fun shutdown_plugins(self) {
@@ -3502,9 +3523,84 @@ impl Ed {
                     }
                 }
             }
+            case Pick(p, id, title, items) {
+                match from {
+                    case Some(h) {
+                        self.plug.asks.push(
+                            Ask(host: h, id: id, kind: "pick", title: title, items: items, initial: ""),
+                        )
+                    }
+                    case None {}
+                }
+            }
+            case Prompt(p, id, title, initial) {
+                match from {
+                    case Some(h) {
+                        let none: list[(str, str)] = []
+                        self.plug.asks.push(
+                            Ask(host: h, id: id, kind: "prompt", title: title, items: none, initial: initial),
+                        )
+                    }
+                    case None {}
+                }
+            }
             case _ {}
         }
     }
+
+    fun ask_label(self, item: (str, str)) -> str {
+        let (label, detail) = item
+        return label if detail == "" else "${label}  ${detail}"
+    }
+
+    // Open the next waiting ask once dusk is back in normal mode, and notice
+    // one the user dismissed (Esc, or a click away).
+    fun update_asks(self) {
+        if self.plug.asking {
+            let a = self.plug.asks[0]
+            let open = (a.kind == "pick" and self.mode == "picker" and self.picker_kind == "plugin") or (a.kind == "prompt" and self.mode == "prompt" and self.prompt_kind == "plugin")
+            if not open {
+                self.answer_ask(JsonValue.Null)
+            }
+        }
+        if self.plug.asking or len(self.plug.asks) == 0 or self.mode != "normal" {
+            return
+        }
+        let a = self.plug.asks[0]
+        self.plug.asking = true
+        self.open_picker("plugin", a.items.map(it => self.ask_label(it))) if a.kind == "pick" else self.start_prompt("plugin", a.initial)
+    }
+
+    // Answer the open ask; Null means it was dismissed.
+    fun answer_ask(self, value: JsonValue) {
+        if not self.plug.asking {
+            return
+        }
+        let a = self.plug.asks.remove_at(0)
+        self.plug.asking = false
+        if a.kind == "pick" {
+            var index = 0 - 1
+            match value {
+                case Str(label) {
+                    for i in range(len(a.items)) {
+                        if index < 0 and self.ask_label(a.items[i]) == label {
+                            index = i
+                        }
+                    }
+                }
+                case _ {}
+            }
+            let label = a.items[index].0 if index >= 0 else ""
+            a.host.respond(a.id, obj([("index", jint(index)), ("label", jstr(label))]))
+        } else {
+            match value {
+                case Str(text) { a.host.respond(a.id, obj([("text", jstr(text))])) }
+                case _ { a.host.respond(a.id, obj([("cancelled", JsonValue.Bool(true))])) }
+            }
+        }
+    }
+
+    fun ask_title(self) -> str = self.plug.asks[0].title if self.plug.asking else ""
 
     fun remove_panel(self, i: int) {
         let _ = self.plug.panels.remove_at(i)

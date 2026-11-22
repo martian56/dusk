@@ -380,3 +380,53 @@ fun test_status_shows_panel_mode() {
     assert_true(screen(ed, 120, 30)[28].contains("PANEL"))
     ed.shutdown_plugins()
 }
+
+fun test_pick_answers_with_choice() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    assert_eq_str("|".join(ed.picker_shown), "a|b  second|c")
+    keys(ed, "<down><cr>")
+    let _ = last_event(ed, "picked b")
+    assert_eq_str(ed.message, "picked b")
+    ed.shutdown_plugins()
+}
+
+fun test_pick_escape_answers_minus_one() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<esc>")
+    assert_true(last_event(ed, "picked "))
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+}
+
+fun test_prompt_answers_text() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.prompt", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "prompt"))
+    assert_true(screen(ed, 80, 10)[9].starts_with("Name: x"))
+    keys(ed, "yz<cr>")
+    assert_true(last_event(ed, "typed xyz"))
+    ed.run("fake.prompt", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "prompt"))
+    keys(ed, "<esc>")
+    assert_true(last_event(ed, "cancelled"))
+    ed.shutdown_plugins()
+}
+
+fun test_ask_waits_for_normal_mode() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    keys(ed, "i")
+    ed.run("fake.pick", 1)
+    let _ = wait_for(ed, 500, e => false)
+    assert_eq_str(ed.mode, "insert")
+    keys(ed, "<esc>")
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    ed.shutdown_plugins()
+}

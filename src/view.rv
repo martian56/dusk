@@ -515,6 +515,8 @@ fun draw_message(ed: Ed, buf: Buffer, y: int) {
             lead = "Rename to: "
         } else if k == "save_as" {
             lead = "Save as: "
+        } else if k == "plugin" {
+            lead = "${ed.ask_title()}: "
         }
         var x = put(buf, 0, y, lead + ed.prompt, st)
         buf.set(min(x, buf.w - 1), y, " ", Style.new().bg(t.c("ui.cursor")))
@@ -572,7 +574,7 @@ fun draw_picker(ed: Ed, buf: Buffer) {
         "languages": "Language",
         "grep": "Matches",
     }
-    let title = titles.get(ed.picker_kind).unwrap_or("Pick")
+    let title = ed.ask_title() if ed.picker_kind == "plugin" else titles.get(ed.picker_kind).unwrap_or("Pick")
     draw_box(ed, buf, x, y, w, h, "${title}  ${len(ed.picker_shown)}/${len(ed.picker_items)}")
     let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
     var cx = put(buf, x + 2, y + 1, "› " + ed.prompt, st.bold())
