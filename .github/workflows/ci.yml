@@ -33,10 +33,6 @@ jobs:
       - name: Build
         run: rvpm build --workspace
 
-      - name: Debug oversized line
-        shell: bash
-        run: timeout 120 raven run debug_bigline.rv || echo "exit $?"
-
       - name: Test
         run: rvpm test
 

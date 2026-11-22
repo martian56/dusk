@@ -31,6 +31,8 @@ let MAX_LOG = 500
 // Bytes waiting to be written to a plugin that is not reading its input.
 let MAX_OUTBOX = 1048576
 // Bytes of output buffered without a complete line, or read in one poll.
+// The runtime keeps at most this much unread output, dropping the oldest,
+// so reaching it means output was already lost.
 let MAX_INBOX = 8388608
 
 class PluginSpec {
@@ -460,7 +462,7 @@ impl PluginProc {
             self.note(line)
         }
         let raw = self.child.read_stdout()
-        if raw.length() + self.out.buf.length() > MAX_INBOX {
+        if raw.length() + self.out.buf.length() >= MAX_INBOX {
             self.fail("flooding")
             for a in self.queued {
                 out.push(a)
@@ -538,7 +540,7 @@ impl PluginProc {
         let m = parse_msg(line)
         let me = self.name()
         if m.kind == "invalid" {
-            self.note("protocol error: ${m.error}: ${line}")
+            self.note("protocol error: ${m.error}: ${line.substring(0, min(200, line.length()))}")
             if not self.reported {
                 self.reported = true
                 out.push(HostAction.Message(me, "${me}: protocol error (see :plugin log ${me})", true))
