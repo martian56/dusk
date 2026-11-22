@@ -835,3 +835,38 @@ fun test_long_status_items_are_cut() {
     assert_true(line.contains("Ln 1"))
     assert_true(line.contains("…"))
 }
+
+fun test_clicking_away_from_a_disk_question_asks_again_later() {
+    let f = with_file("_dusk_ext_click.txt", "one\n")
+    let ed = new_editor_with([f], Config())
+    let _ = screen(ed, 100, 12)
+    keys(ed, "Ax<esc>")
+    sleep_millis(30)
+    write(f, "two\n")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "confirm")
+    keys(ed, "<click:50,5>")
+    assert_eq_str(ed.mode, "normal")
+    ed.check_disk()
+    assert_eq_str(ed.mode, "confirm")
+    keys(ed, "k")
+    let _ = remove_file(f)
+}
+
+fun test_reload_while_selecting_lines_does_not_crash() {
+    let body: list[str] = []
+    for i in range(60) {
+        body.push("line ${i}")
+    }
+    let f = with_file("_dusk_ext_visual.txt", "\n".join(body) + "\n")
+    let ed = new_editor_with([f], Config())
+    ed.doc().row = 50
+    keys(ed, "V10k")
+    sleep_millis(30)
+    write(f, "short\n")
+    ed.check_disk()
+    let _ = screen(ed, 100, 12)
+    assert_eq_str(ed.doc().lines[0], "short")
+    assert_eq_str(ed.mode, "normal")
+    let _ = remove_file(f)
+}

@@ -13,7 +13,7 @@
 //     command = "./todo.exe"
 
 from std.fs import read, write, exists, is_dir, list_dir, create_dir_all
-from std.env import os_name, set_env
+from std.env import os_name, set_env, unset_env, has_env, get_env
 from std.process import run, run_in, Output
 from std.json import JsonValue, parse as parse_json, stringify, json_object, json_string
 from "github.com/martian56/raven-toml" import parse, Toml
@@ -115,9 +115,18 @@ fun git_args(args: list[str]) -> list[str] {
 }
 
 fun git(args: list[str]) -> Result[Output, str] {
-    // Never wait on a credential or host-key question nobody can answer.
+    // Never wait on a credential or host-key question nobody can answer,
+    // and put the variable back so later programs can still prompt.
+    let had = has_env("GIT_TERMINAL_PROMPT")
+    let old = get_env("GIT_TERMINAL_PROMPT")
     let _ = set_env("GIT_TERMINAL_PROMPT", "0")
-    return match run("git", git_args(args)) {
+    let r = run("git", git_args(args))
+    if had {
+        let _ = set_env("GIT_TERMINAL_PROMPT", old)
+    } else {
+        let _ = unset_env("GIT_TERMINAL_PROMPT")
+    }
+    return match r {
         case Ok(o) { Ok(o) }
         case Err(e) { Err("git failed to start: ${e.message}") }
     }

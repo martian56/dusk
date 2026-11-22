@@ -512,7 +512,7 @@ fun draw_status(ed: Ed, buf: Buffer, y: int) {
         items += "${item}  "
     }
     let right = "${items}${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
-    let _ = put(buf, max(x + 1, buf.w - right.length()), y, right, bar)
+    let _ = put(buf, max(x + 1, buf.w - right.chars().len()), y, right, bar)
 }
 
 fun draw_message(ed: Ed, buf: Buffer, y: int) {

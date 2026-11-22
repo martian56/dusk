@@ -3106,6 +3106,7 @@ impl Ed {
                     return
                 }
                 if self.mode == "help" or self.mode == "confirm" {
+                    self.requeue_disk()
                     self.mode = "normal"
                     return
                 }
@@ -3798,13 +3799,14 @@ impl Ed {
             if d.path != p {
                 continue
             }
+            let stamp = modified(p)
             let disk = match read(p) {
                 case Ok(t) { t }
                 case Err(e) {
                     return
                 }
             }
-            d.mtime = modified(p)
+            d.mtime = stamp
             if disk == d.disk {
                 return
             }
@@ -3833,6 +3835,12 @@ impl Ed {
         d.clamp()
         d.touched(0)
         d.dirty = false
+        if d.path == self.doc().path and (self.mode == "visual" or self.mode == "vline") {
+            self.mode = "normal"
+        }
+        self.anchor_row = min(self.anchor_row, len(self.doc().lines) - 1)
+        self.anchor_col = 0 if self.anchor_row < 0 else min(self.anchor_col, self.doc().line_len(max(0, self.anchor_row)))
+        self.anchor_row = max(0, self.anchor_row)
         self.say("reloaded ${d.path}, changed by ${who}")
     }
 
@@ -3841,12 +3849,27 @@ impl Ed {
             return
         }
         let (p, who) = self.plug.disk_asks.remove_at(0)
+        if not self.docs.any(d => d.path == p and d.dirty) {
+            self.ask_disk()
+            return
+        }
         self.plug.asking_disk = p
         self.confirm = "disk"
         self.mode = "confirm"
         self.fail(
             "${p} changed on disk (by ${who}) and has unsaved edits: r reload it, k keep yours",
         )
+    }
+
+    // The disk question was dismissed without an answer: ask it again.
+    fun requeue_disk(self) {
+        if self.mode == "confirm" and self.confirm == "disk" and self.plug.asking_disk != "" {
+            self.plug.disk_asks.insert(0, (self.plug.asking_disk, "another program"))
+            self.plug.asking_disk = ""
+            self.confirm = ""
+            // Ask on the next check, not at once from inside this event.
+            self.plug.disk_checked = 0
+        }
     }
 
     fun answer_disk(self, name: str) {

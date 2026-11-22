@@ -68,6 +68,7 @@ fun open_doc(path: str, lang: int) -> Doc {
     var lines: list[str] = [""]
     var crlf = false
     var disk = ""
+    let stamp = modified(path) if path != "" else 0 - 1
     if path != "" and exists(path) {
         match read(path) {
             case Ok(text) {
@@ -82,7 +83,6 @@ fun open_doc(path: str, lang: int) -> Doc {
             case Err(_) {}
         }
     }
-    let stamp = modified(path) if path != "" else 0 - 1
     return Doc(path: path, lines: lines, lang: lang, crlf: crlf, disk: disk, mtime: stamp)
 }
 
