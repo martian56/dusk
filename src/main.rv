@@ -10,7 +10,7 @@ from "./editor" import Ed, new_editor
 from "./view" import render
 from "./keys" import parse_script
 
-let VERSION = "0.1.0"
+from "./version" import VERSION
 
 fun update(ed: Ed, e: Event) -> Step[Ed] {
     match e {

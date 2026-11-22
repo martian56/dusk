@@ -13,22 +13,18 @@ impl LineReader {
         if chunk == "" {
             return out
         }
-        let s = self.buf + chunk
-        var start = 0
-        var i = s.index_of("\n")
-        while i >= 0 {
-            var line = s.substring(start, i)
+        let parts = (self.buf + chunk).split("\n")
+        let last = len(parts) - 1
+        for i in range(last) {
+            var line = parts[i]
             if line.ends_with("\r") {
                 line = line.substring(0, line.length() - 1)
             }
             if line.trim() != "" {
                 out.push(line)
             }
-            start = i + 1
-            let rest = s.substring(start, s.length()).index_of("\n")
-            i = start + rest if rest >= 0 else 0 - 1
         }
-        self.buf = s.substring(start, s.length())
+        self.buf = parts[last]
         return out
     }
 }
