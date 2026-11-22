@@ -2,7 +2,7 @@
 // layout of their blocks into rows. Drawing is in view.rv.
 
 from std.json import JsonValue, json_int, json_string
-from "github.com/martian56/plumage/text" import Span
+from "github.com/martian56/plumage/text" import Span, Line
 from "github.com/martian56/magpie" import render
 from "github.com/martian56/magpie/theme" import default_theme
 from "./host" import Block, PanelSpec
@@ -20,6 +20,15 @@ class PanelState {
     cursor: dict[str, int] = {}
     // Index into spec.blocks of the focused list, input, or buttons block.
     focus_block: int = 0 - 1
+    // Rendered markdown per block id, reused while the text and width hold.
+    cache: dict[str, Rendered] = {}
+    renders: int = 0
+}
+
+class Rendered {
+    text: str
+    width: int
+    lines: list[Line]
 }
 
 // One laid-out row. `spans` carries markdown styling for text rows; the
@@ -33,6 +42,8 @@ class Row {
     spans: list[Span] = []
     // Cursor column within an input row, -1 when the cursor is elsewhere.
     cursor: int = 0 - 1
+    // Column spans (start, end) of each button on a buttons row.
+    hits: list[(int, int)] = []
 }
 
 // What a key did in a panel: an event for the plugin, or kind "" for none.
@@ -71,6 +82,7 @@ fun new_panel(owner: str, spec: PanelSpec) -> PanelState {
 fun replace_panel(old: PanelState, spec: PanelSpec) -> PanelState {
     let p = new_panel(old.owner, spec)
     p.scroll = old.scroll
+    p.cache = old.cache
     var focused_id = ""
     if old.focus_block >= 0 and old.focus_block < len(old.spec.blocks) {
         focused_id = old.spec.blocks[old.focus_block].id
@@ -109,9 +121,26 @@ fun clip(s: str, w: int) -> str {
     return "".join(cs.slice(0, max(0, w)))
 }
 
-fun text_rows(b: Block, bi: int, w: int) -> list[Row] {
+fun rendered(p: PanelState, b: Block, w: int) -> list[Line] {
+    match p.cache.get(b.id) {
+        case Some(r) {
+            if r.text == b.text and r.width == w {
+                return r.lines
+            }
+        }
+        case None {}
+    }
+    let lines = render(b.text, w, default_theme())
+    p.renders += 1
+    p.cache.set(b.id, Rendered(text: b.text, width: w, lines: lines))
+    return lines
+}
+
+fun text_rows(p: PanelState, b: Block, bi: int, w: int, from: int, to: int) -> list[Row] {
     let out: list[Row] = []
-    for line in render(b.text, w, default_theme()) {
+    let all = rendered(p, b, w)
+    for i in range(max(0, from), min(to, len(all))) {
+        let line = all[i]
         var t = ""
         for sp in line.spans {
             t += sp.text
@@ -159,7 +188,7 @@ fun block_rows(
 ) -> list[Row] {
     let out: list[Row] = []
     if b.kind == "text" {
-        return text_rows(b, bi, w)
+        return text_rows(p, b, bi, w, from, to)
     }
     if b.kind == "list" {
         if len(b.items) == 0 {
@@ -180,12 +209,15 @@ fun block_rows(
     if b.kind == "buttons" {
         let sel = p.sel.get(b.id).unwrap_or(0)
         var t = ""
+        let hits: list[(int, int)] = []
         for i in range(len(b.items)) {
             let (label, detail) = b.items[i]
             let shown = "‹ ${label} ›" if i == sel and p.focus_block == bi else "[ ${label} ]"
+            let start = t.chars().len()
             t += shown + " "
+            hits.push((start, start + shown.chars().len()))
         }
-        out.push(Row(text: clip(t.trim_end(), w), kind: "button", block: bi))
+        out.push(Row(text: clip(t.trim_end(), w), kind: "button", block: bi, hits: hits))
         return out
     }
     let label = b.text
@@ -199,7 +231,7 @@ fun block_height(p: PanelState, b: Block, bi: int, w: int) -> int {
         return max(1, len(b.items))
     }
     if b.kind == "text" {
-        return len(render(b.text, w, default_theme()))
+        return len(rendered(p, b, w))
     }
     if b.kind == "input" {
         return len(p.input.get(b.id).unwrap_or("").split("\n"))
@@ -209,7 +241,16 @@ fun block_height(p: PanelState, b: Block, bi: int, w: int) -> int {
 
 // The rows visible at the panel's scroll, at most `h` of them. Blocks are
 // separated by a blank row.
+fun total_height(p: PanelState, w: int) -> int {
+    var y = 0
+    for bi in range(len(p.spec.blocks)) {
+        y += block_height(p, p.spec.blocks[bi], bi, w) + (1 if bi > 0 else 0)
+    }
+    return y
+}
+
 fun layout(p: PanelState, w: int, h: int, tick: int) -> list[Row] {
+    p.scroll = max(0, min(p.scroll, total_height(p, w) - h))
     let out: list[Row] = []
     var y = 0
     for bi in range(len(p.spec.blocks)) {
@@ -230,8 +271,8 @@ fun layout(p: PanelState, w: int, h: int, tick: int) -> list[Row] {
         }
         let skip = max(0, p.scroll - y)
         let rows = block_rows(p, b, bi, w, tick, skip, skip + h - len(out))
-        // A list already skipped its hidden rows; other blocks skip here.
-        let start = 0 if b.kind == "list" else skip
+        // Lists and text skip their hidden rows themselves.
+        let start = 0 if b.kind == "list" or b.kind == "text" else skip
         for i in range(start, len(rows)) {
             if len(out) >= h {
                 break
@@ -283,6 +324,33 @@ fun move_focus(p: PanelState, dir: int) {
     }
 }
 
+// Up, Down, PageUp, and PageDown scroll the panel. True when `name` was one.
+fun scroll_key(p: PanelState, name: str) -> bool {
+    var by = 0
+    if name == "down" {
+        by = 1
+    } else if name == "up" {
+        by = 0 - 1
+    } else if name == "pagedown" {
+        by = 10
+    } else if name == "pageup" {
+        by = 0 - 10
+    } else {
+        return false
+    }
+    p.scroll = max(0, p.scroll + by)
+    return true
+}
+
+// True when keeping the selection in view makes sense after a key.
+fun has_selection(p: PanelState) -> bool {
+    if p.focus_block < 0 or p.focus_block >= len(p.spec.blocks) {
+        return false
+    }
+    let k = p.spec.blocks[p.focus_block].kind
+    return k == "list" or k == "buttons"
+}
+
 // Apply a key to the focused block. `text` is the typed character, or ""
 // for keys that are not characters.
 fun panel_key(p: PanelState, name: str, text: str) -> PanelEvent {
@@ -294,13 +362,14 @@ fun panel_key(p: PanelState, name: str, text: str) -> PanelEvent {
         move_focus(p, 0 - 1)
         return no_event()
     }
-    if p.focus_block < 0 or p.focus_block >= len(p.spec.blocks) {
-        if name == "down" {
-            p.scroll += 1
-        } else if name == "up" {
-            p.scroll = max(0, p.scroll - 1)
+    let none_focused = p.focus_block < 0 or p.focus_block >= len(p.spec.blocks)
+    if none_focused or p.spec.blocks[p.focus_block].kind == "input" {
+        if scroll_key(p, name) {
+            return no_event()
         }
-        return no_event()
+        if none_focused {
+            return no_event()
+        }
     }
     let b = p.spec.blocks[p.focus_block]
     if b.kind == "list" {

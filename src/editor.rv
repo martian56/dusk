@@ -12,7 +12,16 @@ from "./keys" import key_name, default_keys, normalize_binding
 from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
 from std.json import JsonValue
 from "./rpc" import obj, jstr, jint
-from "./ui" import PanelState, new_panel, replace_panel, panel_key, keep_in_view, layout, paste_into
+from "./ui" import (
+    PanelState,
+    new_panel,
+    replace_panel,
+    panel_key,
+    keep_in_view,
+    layout,
+    paste_into,
+    has_selection,
+)
 from "./host" import (
     PluginSpec,
     PluginProc,
@@ -2107,7 +2116,7 @@ impl Ed {
 
     fun handle_key(self, k: Key) {
         let name = key_name(k)
-        if (name == "f6" or name == "shift+f6") and len(self.plug.panels) > 0 {
+        if (name == "f6" or name == "shift+f6") and len(self.plug.panels) > 0 and self.can_focus_panels() {
             self.cycle_focus(1 if name == "f6" else 0 - 1)
             return
         }
@@ -3661,6 +3670,13 @@ impl Ed {
         return best
     }
 
+    fun has_marks(self, path: str) -> bool {
+        return match self.plug.marks.get(path) {
+            case Some(by_plugin) { by_plugin.values().any(ms => len(ms) > 0) }
+            case None { false }
+        }
+    }
+
     // A plugin that stopped takes its panels, marks, status items, and any
     // waiting pick or prompt with it.
     fun clear_plugin_ui(self, h: PluginProc) {
@@ -3772,12 +3788,31 @@ impl Ed {
             case Char(c) { c }
             case _ { "" }
         }
+        // Ctrl keys keep their global meaning (save, quit, close, open),
+        // except Ctrl+N, which adds a line in an input.
+        let in_input = p.focus_block >= 0 and p.focus_block < len(p.spec.blocks) and p.spec.blocks[p.focus_block].kind == "input"
+        if name.starts_with("ctrl+") and not (name == "ctrl+n" and in_input) {
+            let cmd = self.lookup("global", name)
+            if cmd != "" {
+                self.run(cmd, 1)
+                return
+            }
+        }
         let ev = panel_key(p, name, typed)
         let (w, h) = self.panel_size(i)
-        keep_in_view(p, w, h)
+        if has_selection(p) {
+            keep_in_view(p, w, h)
+        }
         if ev.kind != "" {
             self.send_panel_event(p, ev.block, ev.kind, ev.value)
         }
+    }
+
+    // Panels take focus from editing modes, never from a picker, prompt,
+    // help screen, or question, which keep the keyboard until answered.
+    fun can_focus_panels(self) -> bool {
+        let m = self.mode
+        return m == "normal" or m == "insert" or m == "visual" or m == "vline" or m == "tree" or m == "panel"
     }
 
     fun panel_at(self, x: int, y: int) -> int {
@@ -3792,6 +3827,9 @@ impl Ed {
 
     // Clicks and the wheel over a panel. True when the panel took the event.
     fun panel_mouse(self, m: MouseEvent, x: int, y: int) -> bool {
+        if not self.can_focus_panels() {
+            return false
+        }
         let i = self.panel_at(x, y)
         if i < 0 or i >= len(self.plug.panels) {
             match m.kind {
@@ -3826,6 +3864,14 @@ impl Ed {
                     let b = p.spec.blocks[row.block]
                     if b.kind == "list" or b.kind == "input" or b.kind == "buttons" {
                         p.focus_block = row.block
+                    }
+                    for k in range(len(row.hits)) {
+                        let (a, z) = row.hits[k]
+                        let col = x - rx - 2
+                        if col >= a and col < z {
+                            p.sel.set(b.id, k)
+                            self.send_panel_event(p, b.id, "press", jint(k))
+                        }
                     }
                     if row.item >= 0 {
                         let again = p.sel.get(b.id).unwrap_or(0 - 1) == row.item

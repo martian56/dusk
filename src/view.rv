@@ -92,7 +92,11 @@ fun render(ed: Ed, f: Frame) {
     let side_w = min(34, max(22, buf.w / 5)) if ed.show_tree and buf.w >= 60 else 0
     let d = ed.doc()
     let digits = "${len(d.lines)}".length()
-    let gutter = 0 if ed.cfg.numbers == "off" else max(3, digits) + 2
+    var gutter = 0 if ed.cfg.numbers == "off" else max(3, digits) + 2
+    // A column for plugin marks, so a sign never covers a line number.
+    if ed.has_marks(d.path) {
+        gutter += 2 if gutter == 0 else 1
+    }
     ed.side_w = side_w
     ed.text_x = side_w
     ed.text_y = 1
@@ -286,10 +290,12 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
             }
             let label = "${num}"
             let gst = Style.new().fg(t.c("ui.gutter.current") if is_cur else t.c("ui.gutter")).bg(row_bg)
-            let _ = put(buf, x0 + gutter - 2 - label.length(), y, label, gst)
+            if ed.cfg.numbers != "off" {
+                let _ = put(buf, x0 + gutter - 2 - label.length(), y, label, gst)
+            }
             match ed.mark_at(d.path, r) {
                 case Some(m) {
-                    let sign = m.sign.chars()[0] if m.sign != "" else m.severity.substring(0, 1).to_upper()
+                    let sign = m.sign.chars()[0] if m.sign != "" else m.severity.chars()[0].to_upper()
                     buf.set(x0, y, sign, Style.new().fg(t.c(mark_color(m.severity))).bg(row_bg).bold())
                 }
                 case None {}

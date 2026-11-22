@@ -7,7 +7,7 @@ from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "./config" import Config, Plugin
 from "./editor" import Ed, new_editor_with, edit_error
-from "./host" import Edit, Contribution, HostAction, Mark
+from "./host" import Edit, Contribution, HostAction, Mark, Block, PanelSpec
 from "./keys" import parse_script
 from "./view" import render
 
@@ -495,5 +495,109 @@ fun test_plugin_exit_clears_its_ui() {
     assert_false(ed.plug.status.has("fake/fake"))
     assert_eq_str(ed.mode, "normal")
     ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun long_text(n: int) -> str {
+    let parts: list[str] = []
+    for i in range(n) {
+        parts.push("line ${i}")
+    }
+    return "\n\n".join(parts)
+}
+
+fun make_block(id: str, kind: str, text: str) -> Block = Block(id: id, kind: kind, text: text)
+
+fun text_panel(ed: Ed, with_input: bool) {
+    let blocks: list[Block] = []
+    blocks.push(make_block("t", "text", long_text(200)))
+    if with_input {
+        blocks.push(make_block("ask", "input", ""))
+    }
+    ed.apply_action(
+        HostAction.Panel("fake", PanelSpec(id: "p", title: "Long", dock: "right", blocks: blocks)),
+    )
+    let _ = screen(ed, 120, 30)
+}
+
+fun test_text_only_panel_scrolls_by_keyboard() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, false)
+    keys(ed, "<f6><down><down>")
+    assert_eq_int(ed.plug.panels[0].scroll, 2)
+}
+
+fun test_input_panel_scrolls_text_above() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, true)
+    keys(ed, "<f6><pagedown>")
+    assert_true(ed.plug.panels[0].scroll >= 10)
+}
+
+fun test_text_block_renders_once_per_change() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, false)
+    let before = ed.plug.panels[0].renders
+    for i in range(20) {
+        let _ = screen(ed, 120, 30)
+    }
+    assert_eq_int(ed.plug.panels[0].renders, before)
+}
+
+fun test_global_keys_work_in_a_focused_panel() {
+    let f = with_file("_dusk_panel_save.txt", "a\n")
+    let ed = new_editor_with([f], Config())
+    keys(ed, "ix<esc>")
+    assert_true(ed.doc().dirty)
+    text_panel(ed, true)
+    keys(ed, "<f6><c-s>")
+    assert_false(ed.doc().dirty)
+    let _ = remove_file(f)
+}
+
+fun test_f6_is_ignored_while_a_pick_is_open() {
+    let ed = with_panel()
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "picker")
+    keys(ed, "<down><cr>")
+    assert_true(last_event(ed, "picked b"))
+    ed.shutdown_plugins()
+}
+
+fun test_clicking_a_button_presses_it() {
+    let ed = with_panel()
+    let rows = screen(ed, 120, 30)
+    var y = 0 - 1
+    var x = 0 - 1
+    for i in range(len(rows)) {
+        let at = rows[i].index_of("[ Stop ]")
+        if at >= 0 and y < 0 {
+            y = i
+            x = rows[i].substring(0, at).chars().len()
+        }
+    }
+    assert_true(y >= 0)
+    keys(ed, "<click:${x + 3},${y + 1}>")
+    assert_true(last_event(ed, "event p1 act press 1"))
+    ed.shutdown_plugins()
+}
+
+fun test_marks_leave_line_numbers_whole() {
+    let body: list[str] = []
+    for i in range(120) {
+        body.push("x")
+    }
+    let f = with_file("_dusk_marks_wide.txt", "\n".join(body) + "\n")
+    let ed = new_editor_with([f], Config())
+    ed.apply_action(
+        HostAction.Marks("fake", f, [Mark(row: 104, severity: "error", message: "m", sign: "")]),
+    )
+    ed.doc().row = 104
+    ed.doc().top = 100
+    let rows = screen(ed, 100, 12)
+    assert_true(rows.any(r => r.contains("E105  x")))
+    assert_true(rows.any(r => r.contains(" 104  x")))
     let _ = remove_file(f)
 }
