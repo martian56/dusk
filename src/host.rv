@@ -31,6 +31,8 @@ let MAX_LOG = 500
 // Bytes waiting to be written to a plugin that is not reading its input.
 let MAX_OUTBOX = 1048576
 // Bytes of output buffered without a complete line, or read in one poll.
+// The runtime keeps at most this much unread output, dropping the oldest,
+// so reaching it means output was already lost.
 let MAX_INBOX = 8388608
 
 class PluginSpec {
@@ -69,6 +71,40 @@ enum HostAction {
     EditBuffer(str, int, str, int, list[Edit]),
     OpenBuffer(str, int, str, int),
     Failed(str, str),
+    Panel(str, PanelSpec),
+    ClosePanel(str, str),
+    Pick(str, int, str, list[(str, str)]),
+    Prompt(str, int, str, str),
+    Marks(str, str, list[Mark]),
+    FilesChanged(str, list[str]),
+}
+
+let BLOCK_KINDS = ["text", "list", "input", "buttons", "progress"]
+
+// One piece of a panel. `items` holds list rows or button labels as
+// (label, detail); `value` is a progress percentage, -1 when absent.
+class Block {
+    id: str
+    kind: str
+    text: str = ""
+    items: list[(str, str)] = []
+    value: int = 0 - 1
+}
+
+class PanelSpec {
+    id: str
+    title: str
+    // "right" or "bottom".
+    dock: str
+    blocks: list[Block]
+}
+
+class Mark {
+    row: int
+    // "error", "warning", "info", or "hint".
+    severity: str
+    message: str
+    sign: str
 }
 
 class Pending {
@@ -147,7 +183,68 @@ fun action_text(a: HostAction) -> str {
         case EditBuffer(p, id, path, v, es) { "edit:${path}@${v}" }
         case OpenBuffer(p, id, path, line) { "open:${path}:${line}" }
         case Failed(p, why) { "failed:${why}" }
+        case Panel(p, spec) { "panel:${spec.id}:${len(spec.blocks)}" }
+        case ClosePanel(p, id) { "close:${id}" }
+        case Pick(p, id, title, items) { "pick:${title}:${len(items)}" }
+        case Prompt(p, id, title, initial) { "prompt:${title}" }
+        case Marks(p, path, ms) { "marks:${path}:${len(ms)}" }
+        case FilesChanged(p, paths) { "changed:${",".join(paths)}" }
     }
+}
+
+// List rows and button labels: a string, or {"label", "detail"}.
+fun items_of(v: JsonValue) -> list[(str, str)] {
+    let out: list[(str, str)] = []
+    for it in json_list(v, "items") {
+        match it {
+            case Str(t) { out.push((t, "")) }
+            case _ { out.push((get_str(it, "label"), get_str(it, "detail"))) }
+        }
+    }
+    return out
+}
+
+fun panel_of(v: JsonValue, log: list[str]) -> PanelSpec {
+    let blocks: list[Block] = []
+    for b in json_list(v, "blocks") {
+        let kind = get_str(b, "kind")
+        if not BLOCK_KINDS.contains(kind) {
+            log.push("dropped block of unknown kind ${kind}")
+            continue
+        }
+        blocks.push(
+            Block(
+                id: get_str(b, "id"),
+                kind: kind,
+                text: get_str(b, "text"),
+                items: items_of(b),
+                value: get_int(b, "value", 0 - 1),
+            ),
+        )
+    }
+    let dock = get_str(v, "dock")
+    return PanelSpec(
+        id: get_str(v, "id"),
+        title: get_str(v, "title"),
+        dock: "bottom" if dock == "bottom" else "right",
+        blocks: blocks,
+    )
+}
+
+fun marks_of(v: JsonValue) -> list[Mark] {
+    let out: list[Mark] = []
+    for m in json_list(v, "marks") {
+        let sev = get_str(m, "severity")
+        out.push(
+            Mark(
+                row: get_int(m, "row", 0 - 1),
+                severity: sev if sev != "" else "info",
+                message: get_str(m, "message"),
+                sign: get_str(m, "sign"),
+            ),
+        )
+    }
+    return out
 }
 
 fun json_list(v: JsonValue, key: str) -> list[JsonValue] {
@@ -305,6 +402,20 @@ impl PluginProc {
         self.send(encode_result(id, result))
     }
 
+    fun send_event(self, panel: str, block: str, kind: str, value: JsonValue) {
+        self.notify(
+            "ui/event",
+            obj(
+                [
+                    ("panel", jstr(panel)),
+                    ("block", jstr(block)),
+                    ("kind", jstr(kind)),
+                    ("value", value),
+                ],
+            ),
+        )
+    }
+
     fun respond_error(self, id: int, message: str) {
         self.send(encode_error(id, 0 - 32000, message))
     }
@@ -351,7 +462,7 @@ impl PluginProc {
             self.note(line)
         }
         let raw = self.child.read_stdout()
-        if raw.length() + self.out.buf.length() > MAX_INBOX {
+        if raw.length() + self.out.buf.length() >= MAX_INBOX {
             self.fail("flooding")
             for a in self.queued {
                 out.push(a)
@@ -429,7 +540,7 @@ impl PluginProc {
         let m = parse_msg(line)
         let me = self.name()
         if m.kind == "invalid" {
-            self.note("protocol error: ${m.error}: ${line}")
+            self.note("protocol error: ${m.error}: ${line.substring(0, min(200, line.length()))}")
             if not self.reported {
                 self.reported = true
                 out.push(HostAction.Message(me, "${me}: protocol error (see :plugin log ${me})", true))
@@ -465,6 +576,18 @@ impl PluginProc {
                 out.push(HostAction.Commands(me, contributions(params)))
             } else if m.method == "keys/bind" {
                 out.push(HostAction.Bind(me, bindings(params)))
+            } else if m.method == "files/changed" {
+                let paths: list[str] = []
+                for x in json_list(params, "paths") {
+                    paths.push(x.as_string().unwrap_or(""))
+                }
+                out.push(HostAction.FilesChanged(me, paths))
+            } else if m.method == "ui/panel" {
+                out.push(HostAction.Panel(me, panel_of(params, self.log)))
+            } else if m.method == "ui/close" {
+                out.push(HostAction.ClosePanel(me, get_str(params, "id")))
+            } else if m.method == "marks/set" {
+                out.push(HostAction.Marks(me, get_str(params, "path").replace("\\", "/"), marks_of(params)))
             } else {
                 self.note("unknown notification ${m.method}")
             }
@@ -484,6 +607,10 @@ impl PluginProc {
             )
         } else if m.method == "buffer/open" {
             out.push(HostAction.OpenBuffer(me, m.id, get_str(params, "path"), get_int(params, "line", 1)))
+        } else if m.method == "ui/pick" {
+            out.push(HostAction.Pick(me, m.id, get_str(params, "title"), items_of(params)))
+        } else if m.method == "ui/prompt" {
+            out.push(HostAction.Prompt(me, m.id, get_str(params, "title"), get_str(params, "text")))
         } else {
             self.note("unknown request ${m.method}")
             self.respond_error(m.id, "unknown method ${m.method}")

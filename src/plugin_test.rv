@@ -1,13 +1,15 @@
 from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
 from std.env import get_env
-from std.fs import write, remove_file
+from std.fs import write, remove_file, create_dir_all
+from std.process import run
+from "./install" import remove_tree
 from std.time import now_millis
 from std.sync import sleep_millis
 from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "./config" import Config, Plugin
 from "./editor" import Ed, new_editor_with, edit_error
-from "./host" import Edit, Contribution, HostAction
+from "./host" import Edit, Contribution, HostAction, Mark, Block, PanelSpec
 from "./keys" import parse_script
 from "./view" import render
 
@@ -282,4 +284,451 @@ fun test_tick_if_due_is_rate_limited() {
     assert_true(ed.tick_if_due(1000))
     assert_false(ed.tick_if_due(1020))
     assert_true(ed.tick_if_due(1060))
+}
+
+fun screen(ed: Ed, w: int, h: int) -> list[str] {
+    let f = Frame(Buffer.new(w, h))
+    render(ed, f)
+    let out: list[str] = []
+    for y in range(h) {
+        out.push(f.buf.row_text(y))
+    }
+    return out
+}
+
+fun with_panel() -> Ed {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.panel", 1)
+    assert_true(wait_for(ed, 5000, e => len(e.plug.panels) == 1))
+    let _ = screen(ed, 120, 30)
+    return ed
+}
+
+fun last_event(ed: Ed, want: str) -> bool = wait_for(ed, 5000, e => e.message.starts_with(want))
+
+fun test_panel_opens_docked_right() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let _ = screen(ed, 120, 30)
+    let wide = ed.text_w
+    ed.run("fake.panel", 1)
+    assert_true(wait_for(ed, 5000, e => len(e.plug.panels) == 1))
+    let rows = screen(ed, 120, 30)
+    assert_true(ed.text_w <= wide - 48)
+    assert_true(rows[1].chars().slice(72, 120).join("").contains("Fake"))
+    assert_true("|".join(rows).contains("two.rv  2 hits"))
+    ed.shutdown_plugins()
+}
+
+fun test_f6_cycles_focus_and_esc_returns() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "panel")
+    assert_eq_int(ed.plug.focus, 0)
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "normal")
+    assert_eq_int(ed.plug.focus, 0 - 1)
+    keys(ed, "<s-f6><esc>")
+    assert_eq_str(ed.mode, "normal")
+    assert_eq_int(ed.plug.focus, 0 - 1)
+    ed.shutdown_plugins()
+}
+
+fun test_choose_in_list_sends_event() {
+    let ed = with_panel()
+    keys(ed, "<f6><down><cr>")
+    assert_true(last_event(ed, "event p1 files choose 1"))
+    ed.shutdown_plugins()
+}
+
+fun test_input_submit_sends_text() {
+    let ed = with_panel()
+    keys(ed, "<f6><tab>hi<cr>")
+    assert_true(last_event(ed, "event p1 ask submit \"hi\""))
+    ed.shutdown_plugins()
+}
+
+fun test_click_focuses_panel() {
+    let ed = with_panel()
+    keys(ed, "<click:100,6>")
+    assert_eq_str(ed.mode, "panel")
+    keys(ed, "<click:10,6>")
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+}
+
+fun test_close_button_sends_closed_event() {
+    let ed = with_panel()
+    keys(ed, "<click:119,2>")
+    assert_eq_int(len(ed.plug.panels), 0)
+    assert_true(last_event(ed, "event p1  closed"))
+    ed.shutdown_plugins()
+}
+
+fun test_replace_keeps_focus() {
+    let ed = with_panel()
+    keys(ed, "<f6><down>")
+    ed.run("fake.panel", 1)
+    let _ = wait_for(ed, 500, e => false)
+    assert_eq_str(ed.mode, "panel")
+    assert_eq_int(ed.plug.panels[0].sel.get("files").unwrap_or(0), 1)
+    ed.shutdown_plugins()
+}
+
+fun test_status_shows_panel_mode() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    assert_true(screen(ed, 120, 30)[28].contains("PANEL"))
+    ed.shutdown_plugins()
+}
+
+fun test_pick_answers_with_choice() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    assert_eq_str("|".join(ed.picker_shown), "a|b  second|c")
+    keys(ed, "<down><cr>")
+    let _ = last_event(ed, "picked b")
+    assert_eq_str(ed.message, "picked b")
+    ed.shutdown_plugins()
+}
+
+fun test_pick_escape_answers_minus_one() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<esc>")
+    assert_true(last_event(ed, "picked "))
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+}
+
+fun test_prompt_answers_text() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.prompt", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "prompt"))
+    assert_true(screen(ed, 80, 10)[9].starts_with("Name: x"))
+    keys(ed, "yz<cr>")
+    assert_true(last_event(ed, "typed xyz"))
+    ed.run("fake.prompt", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "prompt"))
+    keys(ed, "<esc>")
+    assert_true(last_event(ed, "cancelled"))
+    ed.shutdown_plugins()
+}
+
+fun test_ask_waits_for_normal_mode() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    keys(ed, "i")
+    ed.run("fake.pick", 1)
+    let _ = wait_for(ed, 500, e => false)
+    assert_eq_str(ed.mode, "insert")
+    keys(ed, "<esc>")
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    ed.shutdown_plugins()
+}
+
+fun test_marks_draw_in_gutter_and_message() {
+    let f = with_file("_dusk_marks_test.txt", "first\nsecond\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.marks", 1)
+    assert_true(wait_for(ed, 5000, e => e.mark_at(f, 0).is_some()))
+    ed.say("")
+    let rows = screen(ed, 100, 12)
+    assert_eq_str(rows[1].chars()[22], "E")
+    assert_true(rows[11].contains("error: bad line"))
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_marks_for_unopened_file_apply_on_open() {
+    let f = with_file("_dusk_marks_later.txt", "x\n")
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let none: list[Mark] = []
+    ed.apply_action(
+        HostAction.Marks("fake", f, [Mark(row: 0, severity: "warning", message: "later", sign: "")]),
+    )
+    ed.open(f)
+    assert_eq_str(ed.mark_at(f, 0).unwrap().message, "later")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_marks_past_end_are_ignored() {
+    let f = with_file("_dusk_marks_far.txt", "only\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.marks", 1)
+    assert_true(wait_for(ed, 5000, e => e.mark_at(f, 0).is_some()))
+    assert_true(ed.mark_at(f, 999).is_none())
+    let _ = screen(ed, 100, 12)
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_plugin_exit_clears_its_ui() {
+    let f = with_file("_dusk_exit_ui.txt", "x\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.panel", 1)
+    ed.run("fake.marks", 1)
+    ed.run("fake.hello", 1)
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => len(e.plug.panels) == 1 and e.mark_at(f, 0).is_some() and e.plug.status.has(
+                "fake/fake",
+            ),
+        ),
+    )
+    keys(ed, "<f6>")
+    ed.run("fake.die", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.hosts[0].state == "exited"))
+    assert_eq_int(len(ed.plug.panels), 0)
+    assert_true(ed.mark_at(f, 0).is_none())
+    assert_false(ed.plug.status.has("fake/fake"))
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun long_text(n: int) -> str {
+    let parts: list[str] = []
+    for i in range(n) {
+        parts.push("line ${i}")
+    }
+    return "\n\n".join(parts)
+}
+
+fun make_block(id: str, kind: str, text: str) -> Block = Block(id: id, kind: kind, text: text)
+
+fun text_panel(ed: Ed, with_input: bool) {
+    let blocks: list[Block] = []
+    blocks.push(make_block("t", "text", long_text(200)))
+    if with_input {
+        blocks.push(make_block("ask", "input", ""))
+    }
+    ed.apply_action(
+        HostAction.Panel("fake", PanelSpec(id: "p", title: "Long", dock: "right", blocks: blocks)),
+    )
+    let _ = screen(ed, 120, 30)
+}
+
+fun test_text_only_panel_scrolls_by_keyboard() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, false)
+    keys(ed, "<f6><down><down>")
+    assert_eq_int(ed.plug.panels[0].scroll, 2)
+}
+
+fun test_input_panel_scrolls_text_above() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, true)
+    keys(ed, "<f6><pagedown>")
+    assert_true(ed.plug.panels[0].scroll >= 10)
+}
+
+fun test_text_block_renders_once_per_change() {
+    let ed = new_editor_with([], Config())
+    text_panel(ed, false)
+    let before = ed.plug.panels[0].renders
+    for i in range(20) {
+        let _ = screen(ed, 120, 30)
+    }
+    assert_eq_int(ed.plug.panels[0].renders, before)
+}
+
+fun test_global_keys_work_in_a_focused_panel() {
+    let f = with_file("_dusk_panel_save.txt", "a\n")
+    let ed = new_editor_with([f], Config())
+    keys(ed, "ix<esc>")
+    assert_true(ed.doc().dirty)
+    text_panel(ed, true)
+    keys(ed, "<f6><c-s>")
+    assert_false(ed.doc().dirty)
+    let _ = remove_file(f)
+}
+
+fun test_f6_is_ignored_while_a_pick_is_open() {
+    let ed = with_panel()
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "picker")
+    keys(ed, "<down><cr>")
+    assert_true(last_event(ed, "picked b"))
+    ed.shutdown_plugins()
+}
+
+fun test_clicking_a_button_presses_it() {
+    let ed = with_panel()
+    let rows = screen(ed, 120, 30)
+    var y = 0 - 1
+    var x = 0 - 1
+    for i in range(len(rows)) {
+        let at = rows[i].index_of("[ Stop ]")
+        if at >= 0 and y < 0 {
+            y = i
+            x = rows[i].substring(0, at).chars().len()
+        }
+    }
+    assert_true(y >= 0)
+    keys(ed, "<click:${x + 3},${y + 1}>")
+    assert_true(last_event(ed, "event p1 act press 1"))
+    ed.shutdown_plugins()
+}
+
+fun test_marks_leave_line_numbers_whole() {
+    let body: list[str] = []
+    for i in range(120) {
+        body.push("x")
+    }
+    let f = with_file("_dusk_marks_wide.txt", "\n".join(body) + "\n")
+    let ed = new_editor_with([f], Config())
+    ed.apply_action(
+        HostAction.Marks("fake", f, [Mark(row: 104, severity: "error", message: "m", sign: "")]),
+    )
+    ed.doc().row = 104
+    ed.doc().top = 100
+    let rows = screen(ed, 100, 12)
+    assert_true(rows.any(r => r.contains("E105  x")))
+    assert_true(rows.any(r => r.contains(" 104  x")))
+    let _ = remove_file(f)
+}
+
+fun test_files_changed_reloads_a_clean_buffer() {
+    let f = with_file("_dusk_touch_clean.txt", "before\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    ed.run("fake.touch", 1)
+    assert_true(wait_for(ed, 5000, e => e.doc().lines[0] == "changed on disk"))
+    assert_false(ed.doc().dirty)
+    keys(ed, "u")
+    assert_eq_str(ed.doc().lines[0], "before")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_files_changed_keeps_unsaved_edits() {
+    let f = with_file("_dusk_touch_dirty.txt", "before\n")
+    let ed = editor("echo", [f])
+    assert_true(ready(ed))
+    keys(ed, "Amine<esc>")
+    ed.run("fake.touch", 1)
+    assert_true(wait_for(ed, 5000, e => e.message.contains("changed on disk")))
+    assert_eq_str(ed.doc().lines[0], "beforemine")
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_plugin_install_and_remove_from_the_editor() {
+    let root = "_dusk_ed_install"
+    let _ = remove_tree(root)
+    let _ = create_dir_all("${root}/src")
+    let _ = run("git", ["init", "-q", "${root}/src"])
+    let bin = "../../../" + fake_binary()
+    write(
+        "${root}/src/dusk-plugin.toml",
+        "name = \"fake\"\nversion = \"0.1.0\"\ncommand = \"${bin}\"\nargs = [\"echo\"]\n",
+    )
+    let id = ["-C", "${root}/src", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    let _ = run("git", id.concat(["add", "."]))
+    let _ = run("git", id.concat(["commit", "-q", "-m", "first"]))
+    let _ = run("git", id.concat(["tag", "v0.1.0"]))
+    let ed = new_editor_with([], Config())
+    ed.plug.install_root = "${root}/plugins"
+    ed.ex("plugin install ./${root}/src@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.plug.commands.has("fake.hello")))
+    assert_true(ed.message.contains("installed fake 0.1.0"))
+    ed.ex("plugin list")
+    assert_true(ed.message.contains("fake 0.1.0 @v0.1.0"))
+    ed.ex("plugin remove fake")
+    assert_true(wait_for(ed, 10000, e => e.message.contains("removed fake")))
+    assert_false(ed.plug.commands.has("fake.hello"))
+    assert_eq_int(len(ed.plug.hosts), 0)
+    let _ = remove_tree(root)
+}
+
+fun test_files_changed_ignores_identical_text() {
+    let f = with_file("_dusk_same.txt", "no newline")
+    let ed = new_editor_with([f], Config())
+    let undo = len(ed.doc().undo)
+    ed.apply_action(HostAction.FilesChanged("rook", [f]))
+    assert_eq_int(len(ed.doc().undo), undo)
+    assert_false(ed.message.contains("reloaded"))
+    keys(ed, "Ax<esc>")
+    ed.say("")
+    write("_dusk_other.txt", "y\n")
+    ed.apply_action(HostAction.FilesChanged("rook", [f]))
+    assert_false(ed.message.contains("changed on disk"))
+    let _ = remove_file(f)
+    let _ = remove_file("_dusk_other.txt")
+}
+
+fun test_ask_opens_from_a_focused_panel() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    ed.run("fake.pick", 1)
+    assert_true(wait_for(ed, 5000, e => e.mode == "picker"))
+    keys(ed, "<cr>")
+    assert_true(last_event(ed, "picked a"))
+    ed.shutdown_plugins()
+}
+
+fun test_visual_selection_reaches_a_plugin_command_from_ex() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let _ = ed.doc().insert_at(0, 0, "alpha\nbeta")
+    keys(ed, "Vj:fake.sel<cr>")
+    assert_true(wait_for(ed, 5000, e => e.message.starts_with("sel ")))
+    assert_true(ed.message.contains("alpha") and ed.message.contains("beta"))
+    ed.shutdown_plugins()
+}
+
+fun fake_repo(root: str) {
+    let _ = remove_tree(root)
+    let _ = create_dir_all("${root}/src")
+    let _ = run("git", ["init", "-q", "${root}/src"])
+    let bin = "../../../" + fake_binary()
+    write(
+        "${root}/src/dusk-plugin.toml",
+        "name = \"fake\"\nversion = \"0.1.0\"\ncommand = \"${bin}\"\nargs = [\"echo\"]\n",
+    )
+    let id = ["-C", "${root}/src", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    let _ = run("git", id.concat(["add", "."]))
+    let _ = run("git", id.concat(["commit", "-q", "-m", "first"]))
+    let _ = run("git", id.concat(["tag", "v0.1.0"]))
+}
+
+fun test_config_plugin_wins_and_survives_failed_updates() {
+    let root = "_dusk_ed_config"
+    fake_repo(root)
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.plug.install_root = "${root}/plugins"
+    ed.ex("plugin update fake@v0.1.0")
+    assert_true(ed.message.contains("no installed plugin fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.ex("plugin remove fake")
+    assert_true(ed.message.contains("no installed plugin fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.ex("plugin install ./${root}/src@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.message.contains("runs instead")))
+    assert_eq_int(len(ed.plug.hosts), 1)
+    assert_eq_str(ed.plug.hosts[0].spec.command, fake_binary())
+    ed.ex("plugin update fake@v0.1.0")
+    assert_true(wait_for(ed, 20000, e => e.message.contains("runs instead")))
+    ed.ex("plugin remove fake")
+    assert_true(ed.message.contains("removed fake"))
+    assert_eq_str(ed.plug.hosts[0].state, "running")
+    ed.shutdown_plugins()
+    let _ = remove_tree(root)
 }

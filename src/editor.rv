@@ -12,7 +12,38 @@ from "./keys" import key_name, default_keys, normalize_binding
 from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
 from std.json import JsonValue
 from "./rpc" import obj, jstr, jint
-from "./host" import PluginSpec, PluginProc, HostAction, Contribution, Binding, Edit, start_plugin
+from "./ui" import (
+    PanelState,
+    new_panel,
+    replace_panel,
+    panel_key,
+    keep_in_view,
+    layout,
+    paste_into,
+    has_selection,
+)
+from std.sync import Mutex, mutex
+from "./install" import (
+    Staged,
+    stage,
+    stage_update,
+    swap,
+    dir_of,
+    installed_plugins,
+    remove_installed,
+    list_text,
+    split_ref,
+)
+from "./host" import (
+    PluginSpec,
+    PluginProc,
+    HostAction,
+    Contribution,
+    Binding,
+    Edit,
+    Mark,
+    start_plugin,
+)
 
 class Jump {
     path: str
@@ -95,6 +126,41 @@ class Ed {
     dragging: bool = false
 }
 
+// An install or update running on a goroutine, so git never blocks the
+// editor. The tick applies the result.
+class Job {
+    lock: Mutex
+    done: bool = false
+    staged: Option[Staged] = None
+    error: str = ""
+}
+
+fun run_stage(job: Job, dir: str, target: str, ref: str, update: bool) {
+    let r = stage_update(dir, target, ref) if update else stage(dir, target, ref)
+    job.lock.lock()
+    match r {
+        case Ok(st) {
+            job.staged = Some(st)
+        }
+        case Err(e) {
+            job.error = e
+        }
+    }
+    job.done = true
+    job.lock.unlock()
+}
+
+// A pick or prompt a plugin asked for, answered on the process that asked.
+class Ask {
+    host: PluginProc
+    id: int
+    // "pick" or "prompt".
+    kind: str
+    title: str
+    items: list[(str, str)]
+    initial: str
+}
+
 // Protocol plugin state, kept apart from Ed's own fields.
 class Plugins {
     hosts: list[PluginProc] = []
@@ -108,6 +174,31 @@ class Plugins {
     cursor: str = ""
     cursor_sent: int = 0
     last_tick: int = 0 - 1000000
+    panels: list[PanelState] = []
+    // The focused panel, -1 for the editor.
+    focus: int = 0 - 1
+    mode_before: str = "normal"
+    // Screen rectangle (x, y, w, h) of each panel from the last frame.
+    rects: list[(int, int, int, int)] = []
+    frame: int = 0
+    // Waiting picks and prompts; the first is on screen when `asking`.
+    asks: list[Ask] = []
+    asking: bool = false
+    // Path -> plugin -> its marks for that file.
+    marks: dict[str, dict[str, list[Mark]]] = {}
+    // Where :plugin install puts plugins; "" means ~/.config/dusk/plugins.
+    install_root: str = ""
+    jobs: list[Job] = []
+}
+
+fun severity_rank(s: str) -> int {
+    if s == "error" {
+        return 4
+    }
+    if s == "warning" {
+        return 3
+    }
+    return 2 if s == "info" else 1
 }
 
 let CHANGES = [
@@ -132,7 +223,16 @@ let CHANGES = [
     "open_above",
 ]
 
-fun new_editor(paths: list[str]) -> Ed = new_editor_with(paths, load_config())
+fun new_editor(paths: list[str]) -> Ed {
+    let cfg = load_config()
+    // Installed plugins, unless the config already has one by that name.
+    for p in installed_plugins(config_dir() + "/plugins") {
+        if not cfg.plugins.any(q => q.name == p.name) {
+            cfg.plugins.push(p)
+        }
+    }
+    return new_editor_with(paths, cfg)
+}
 
 fun new_editor_with(paths: list[str], cfg: Config) -> Ed {
     let langs = builtin_langs()
@@ -1180,7 +1280,9 @@ impl Ed {
     }
 
     fun filter_picker(self) {
-        self.picker_shown = fuzzy_filter(self.prompt, self.picker_items, 500)
+        // A plugin's list keeps its own order until the user types.
+        let keep = self.picker_kind == "plugin" and self.prompt == ""
+        self.picker_shown = self.picker_items.copy() if keep else fuzzy_filter(self.prompt, self.picker_items, 500)
         self.picker_sel = min(self.picker_sel, max(0, len(self.picker_shown) - 1))
     }
 
@@ -1213,6 +1315,8 @@ impl Ed {
                 let col = self.doc().lines[max(0, min(r, len(self.doc().lines) - 1))].index_of(self.search)
                 self.go(r, max(0, col))
             }
+        } else if kind == "plugin" {
+            self.answer_ask(JsonValue.Str(item))
         } else if kind == "themes" {
             self.set_theme(item)
         } else if kind == "languages" {
@@ -1263,6 +1367,18 @@ impl Ed {
         let visual = self.mode == "visual" or self.mode == "vline"
         if self.plug.commands.has(name) {
             self.run_plugin_command(name)
+            return
+        }
+        if name == "focus_next" or name == "focus_prev" {
+            if len(self.plug.panels) == 0 {
+                self.fail("no plugin panels")
+            } else {
+                self.cycle_focus(1 if name == "focus_next" else 0 - 1)
+            }
+            return
+        }
+        if name == "close_panel" {
+            self.close_focused_panel()
             return
         }
         if name.starts_with("plugin.") {
@@ -1832,7 +1948,9 @@ impl Ed {
         }
         // A plugin run from `:'<,'>` reads the selection, so the visual
         // mode it was started from stays until the plugin has run.
-        let from_visual = cmd.starts_with("plugin.") and (self.prompt_mode_before == "visual" or self.prompt_mode_before == "vline")
+        let first = cmd.substring(0, cmd.index_of(" ")) if cmd.index_of(" ") >= 0 else cmd
+        let names_plugin = cmd.starts_with("plugin.") or self.plug.commands.has(first)
+        let from_visual = names_plugin and (self.prompt_mode_before == "visual" or self.prompt_mode_before == "vline")
         self.mode = self.prompt_mode_before if from_visual else "normal"
         match cmd.parse_int() {
             case Some(n) {
@@ -1967,6 +2085,8 @@ impl Ed {
             }
         } else if head == "plugin" and arg.starts_with("log") {
             self.show_plugin_log(arg.substring(3, arg.length()).trim())
+        } else if head == "plugin" {
+            self.plugin_admin(arg)
         } else if head == "sort" {
             if not ranged {
                 r1 = 0
@@ -2048,6 +2168,14 @@ impl Ed {
 
     fun handle_key(self, k: Key) {
         let name = key_name(k)
+        if (name == "f6" or name == "shift+f6") and len(self.plug.panels) > 0 and self.can_focus_panels() {
+            self.cycle_focus(1 if name == "f6" else 0 - 1)
+            return
+        }
+        if self.mode == "panel" {
+            self.panel_input(k, name)
+            return
+        }
         if not self.replaying and self.mode != "help" {
             self.message = "" if self.mode == "normal" and self.pending == "" and self.op == "" else self.message
         }
@@ -2657,7 +2785,9 @@ impl Ed {
             case Enter {
                 let text = self.prompt
                 self.mode = "normal"
-                if kind == "command" {
+                if kind == "plugin" {
+                    self.answer_ask(JsonValue.Str(text))
+                } else if kind == "command" {
                     self.ex(text)
                 } else if kind == "search" {
                     if text != "" {
@@ -2865,6 +2995,10 @@ impl Ed {
     }
 
     fun paste_text(self, text: str) {
+        if self.mode == "panel" and self.plug.focus >= 0 {
+            paste_into(self.plug.panels[self.plug.focus], text)
+            return
+        }
         let d = self.doc()
         if self.mode == "prompt" or self.mode == "picker" {
             self.prompt += text.split("\n")[0]
@@ -2905,6 +3039,9 @@ impl Ed {
         }
         let x = m.x - 1
         let y = m.y - 1
+        if self.panel_mouse(m, x, y) {
+            return
+        }
         let d = self.doc()
         let in_side = self.show_tree and x < self.side_w
         let in_text = x >= self.text_x and y >= self.text_y and y < self.text_y + self.text_h
@@ -3069,6 +3206,9 @@ impl Ed {
 
 // Every built-in command with a short description, for the palette and help.
 let COMMANDS = [
+    ("focus_next", "focus the next plugin panel (F6)"),
+    ("focus_prev", "focus the previous plugin panel (Shift+F6)"),
+    ("close_panel", "close the focused plugin panel"),
     ("save", "write the file"),
     ("save_all", "write every changed file"),
     ("quit", "quit (asks about unsaved files)"),
@@ -3363,6 +3503,13 @@ impl Ed {
             for a in h.poll(now_ms) {
                 self.apply_from(Some(h), a)
             }
+            if h.state != "running" {
+                self.clear_plugin_ui(h)
+            }
+        }
+        self.update_asks()
+        if len(self.plug.jobs) > 0 {
+            self.finish_jobs()
         }
     }
 
@@ -3440,6 +3587,563 @@ impl Ed {
                     case None {}
                 }
             }
+            case _ { self.apply_ui(from, a) }
         }
+    }
+
+    fun apply_ui(self, from: Option[PluginProc], a: HostAction) {
+        match a {
+            case Panel(p, spec) {
+                for i in range(len(self.plug.panels)) {
+                    let old = self.plug.panels[i]
+                    if old.owner == p and old.spec.id == spec.id {
+                        self.plug.panels[i] = replace_panel(old, spec)
+                        return
+                    }
+                }
+                self.plug.panels.push(new_panel(p, spec))
+            }
+            case ClosePanel(p, id) {
+                for i in range(len(self.plug.panels)) {
+                    if self.plug.panels[i].owner == p and self.plug.panels[i].spec.id == id {
+                        self.remove_panel(i)
+                        return
+                    }
+                }
+            }
+            case Marks(p, path, ms) {
+                if not self.plug.marks.has(path) {
+                    let fresh: dict[str, list[Mark]] = {}
+                    self.plug.marks.set(path, fresh)
+                }
+                self.plug.marks.get(path).unwrap().set(p, ms.filter(m => m.row >= 0))
+            }
+            case FilesChanged(p, paths) {
+                for path in paths {
+                    self.file_changed(p, path)
+                }
+            }
+            case Pick(p, id, title, items) {
+                match from {
+                    case Some(h) {
+                        self.plug.asks.push(
+                            Ask(host: h, id: id, kind: "pick", title: title, items: items, initial: ""),
+                        )
+                    }
+                    case None {}
+                }
+            }
+            case Prompt(p, id, title, initial) {
+                match from {
+                    case Some(h) {
+                        let none: list[(str, str)] = []
+                        self.plug.asks.push(
+                            Ask(host: h, id: id, kind: "prompt", title: title, items: none, initial: initial),
+                        )
+                    }
+                    case None {}
+                }
+            }
+            case _ {}
+        }
+    }
+
+    fun ask_label(self, item: (str, str)) -> str {
+        let (label, detail) = item
+        return label if detail == "" else "${label}  ${detail}"
+    }
+
+    // Open the next waiting ask once dusk is back in normal mode, and notice
+    // one the user dismissed (Esc, or a click away).
+    fun update_asks(self) {
+        if self.plug.asking {
+            let a = self.plug.asks[0]
+            let open = (a.kind == "pick" and self.mode == "picker" and self.picker_kind == "plugin") or (a.kind == "prompt" and self.mode == "prompt" and self.prompt_kind == "plugin")
+            if not open {
+                self.answer_ask(JsonValue.Null)
+            }
+        }
+        if self.plug.asking or len(self.plug.asks) == 0 or (self.mode != "normal" and self.mode != "panel") {
+            return
+        }
+        if self.mode == "panel" {
+            self.focus_panel(0 - 1)
+            self.mode = "normal"
+        }
+        let a = self.plug.asks[0]
+        self.plug.asking = true
+        self.open_picker("plugin", a.items.map(it => self.ask_label(it))) if a.kind == "pick" else self.start_prompt("plugin", a.initial)
+    }
+
+    // Answer the open ask; Null means it was dismissed.
+    fun answer_ask(self, value: JsonValue) {
+        if not self.plug.asking {
+            return
+        }
+        let a = self.plug.asks.remove_at(0)
+        self.plug.asking = false
+        if a.kind == "pick" {
+            var index = 0 - 1
+            match value {
+                case Str(label) {
+                    for i in range(len(a.items)) {
+                        if index < 0 and self.ask_label(a.items[i]) == label {
+                            index = i
+                        }
+                    }
+                }
+                case _ {}
+            }
+            let label = a.items[index].0 if index >= 0 else ""
+            a.host.respond(a.id, obj([("index", jint(index)), ("label", jstr(label))]))
+        } else {
+            match value {
+                case Str(text) { a.host.respond(a.id, obj([("text", jstr(text))])) }
+                case _ { a.host.respond(a.id, obj([("cancelled", JsonValue.Bool(true))])) }
+            }
+        }
+    }
+
+    // The most severe mark any plugin set on `row` of `path`, ignoring rows
+    // past the end of an open buffer.
+    fun mark_at(self, path: str, row: int) -> Option[Mark] {
+        let by_plugin = match self.plug.marks.get(path) {
+            case Some(m) { m }
+            case None {
+                return None
+            }
+        }
+        match self.doc_at(path) {
+            case Some(d) {
+                if path != "" and row >= len(d.lines) {
+                    return None
+                }
+            }
+            case None {}
+        }
+        var best: Option[Mark] = None
+        var rank = 0
+        for (p, ms) in by_plugin {
+            for m in ms {
+                if m.row == row and severity_rank(m.severity) > rank {
+                    rank = severity_rank(m.severity)
+                    best = Some(m)
+                }
+            }
+        }
+        return best
+    }
+
+    // A plugin changed `path` on disk: reload an open buffer that has no
+    // unsaved edits (one undo step brings the old text back), and warn about
+    // one that does.
+    fun file_changed(self, plugin: str, path: str) {
+        let p = path.replace("\\", "/")
+        if p == "" {
+            return
+        }
+        for d in self.docs {
+            if d.path != p {
+                continue
+            }
+            let disk = match read(p) {
+                case Ok(t) { t }
+                case Err(e) {
+                    return
+                }
+            }
+            if disk == d.disk {
+                return
+            }
+            if d.dirty {
+                d.disk = disk
+                self.fail("${p} changed on disk (by ${plugin}); :e reloads it and drops your edits")
+                return
+            }
+            let fresh = open_doc(p, d.lang)
+            if fresh.lines.len() == d.lines.len() and "\n".join(fresh.lines) == "\n".join(d.lines) {
+                d.disk = disk
+                d.crlf = fresh.crlf
+                return
+            }
+            d.checkpoint()
+            d.lines = fresh.lines
+            d.crlf = fresh.crlf
+            d.disk = disk
+            d.clamp()
+            d.touched(0)
+            d.dirty = false
+            self.say("reloaded ${p}, changed by ${plugin}")
+            return
+        }
+    }
+
+    fun plugins_dir(self) -> str = self.plug.install_root if self.plug.install_root != "" else config_dir() + "/plugins"
+
+    // :plugin install <url>[@tag], update <name>[@tag], remove <name>, list.
+    fun plugin_admin(self, arg: str) {
+        let sp = arg.index_of(" ")
+        let verb = arg.substring(0, sp) if sp >= 0 else arg
+        let rest = arg.substring(sp + 1, arg.length()).trim() if sp >= 0 else ""
+        let dir = self.plugins_dir()
+        if verb == "list" {
+            self.say(list_text(dir))
+            return
+        }
+        if rest == "" {
+            self.fail(
+                "usage: :plugin install <git url>[@tag], :plugin update <name>[@tag], :plugin remove <name>, :plugin list, :plugin log <name>",
+            )
+            return
+        }
+        if verb == "remove" {
+            if dir_of(dir, rest) == "" {
+                self.fail("no installed plugin ${rest}")
+                return
+            }
+            let mine = self.config_owns(rest)
+            if not mine {
+                self.stop_plugin(rest)
+            }
+            let msg = remove_installed(dir, rest)
+            if msg.starts_with("error:") {
+                self.fail(msg)
+                return
+            }
+            if not mine {
+                self.cfg.plugins = self.cfg.plugins.filter(p => p.name != rest)
+            }
+            self.say(msg)
+            return
+        }
+        if verb != "install" and verb != "update" {
+            self.fail("unknown :plugin action ${verb}")
+            return
+        }
+        var target = rest
+        var ref = ""
+        if verb == "update" {
+            // A name never holds an @, so the last one starts the ref.
+            let at = rest.last_index_of("@")
+            if at > 0 {
+                target = rest.substring(0, at)
+                ref = rest.substring(at + 1, rest.length())
+            }
+            if dir_of(dir, target) == "" {
+                self.fail("no installed plugin ${target}")
+                return
+            }
+        } else {
+            let (t, r) = split_ref(rest)
+            target = t
+            ref = r
+        }
+        let job = Job(lock: mutex())
+        self.plug.jobs.push(job)
+        let update = verb == "update"
+        spawn {
+            run_stage(job, dir, target, ref, update)
+        }
+        self.say("${"updating" if update else "installing"} ${target}...")
+    }
+
+    // A [[plugin]] in the config by this name, which wins over an installed one.
+    fun config_owns(self, name: str) -> bool = self.cfg.plugins.any(
+        p => p.name == name and not p.installed,
+    )
+
+    // Shut a plugin down and forget its commands and UI.
+    fun stop_plugin(self, name: str) {
+        let keep: list[PluginProc] = []
+        for h in self.plug.hosts {
+            if h.spec.name == name {
+                h.shutdown()
+                self.clear_plugin_ui(h)
+            } else {
+                keep.push(h)
+            }
+        }
+        self.plug.hosts = keep
+        for c in self.plug.owner.keys() {
+            if self.plug.owner.get(c).unwrap_or("") == name {
+                let _ = self.plug.owner.remove(c)
+                let _ = self.plug.commands.remove(c)
+            }
+        }
+    }
+
+    // A staged install is ready: stop the running copy (Windows locks its
+    // files), swap the new one in, and start it, unless the config's own
+    // [[plugin]] of that name is the one that runs.
+    fun finish_jobs(self) {
+        let waiting: list[Job] = []
+        for job in self.plug.jobs {
+            job.lock.lock()
+            let done = job.done
+            let staged = job.staged
+            let error = job.error
+            job.lock.unlock()
+            if not done {
+                waiting.push(job)
+                continue
+            }
+            match staged {
+                case Some(st) { self.apply_staged(st) }
+                case None { self.fail("error: ${error}") }
+            }
+        }
+        self.plug.jobs = waiting
+    }
+
+    fun apply_staged(self, st: Staged) {
+        let name = st.manifest.name
+        let mine = self.config_owns(name)
+        let was_running = not mine and self.host_named(name).is_some()
+        if not mine {
+            self.stop_plugin(name)
+        }
+        let msg = swap(self.plugins_dir(), st)
+        if msg.starts_with("error:") {
+            self.fail(msg)
+            if was_running {
+                for p in self.cfg.plugins.filter(q => q.name == name) {
+                    self.start_host(p)
+                }
+            }
+            return
+        }
+        if mine {
+            self.say("${msg}; your config's [[plugin]] ${name} runs instead")
+            return
+        }
+        for p in installed_plugins(self.plugins_dir()) {
+            if p.name == name {
+                self.cfg.plugins = self.cfg.plugins.filter(q => q.name != name)
+                self.cfg.plugins.push(p)
+                if p.activation.contains("startup") {
+                    self.start_host(p)
+                }
+            }
+        }
+        self.activate_for_language()
+        self.say(msg)
+    }
+
+    fun has_marks(self, path: str) -> bool {
+        return match self.plug.marks.get(path) {
+            case Some(by_plugin) { by_plugin.values().any(ms => len(ms) > 0) }
+            case None { false }
+        }
+    }
+
+    // A plugin that stopped takes its panels, marks, status items, and any
+    // waiting pick or prompt with it.
+    fun clear_plugin_ui(self, h: PluginProc) {
+        let name = h.spec.name
+        var i = len(self.plug.panels) - 1
+        while i >= 0 {
+            if self.plug.panels[i].owner == name {
+                self.remove_panel(i)
+            }
+            i -= 1
+        }
+        for (path, by_plugin) in self.plug.marks {
+            let _ = by_plugin.remove(name)
+        }
+        for k in self.plug.status.keys() {
+            if k.starts_with("${name}/") {
+                let _ = self.plug.status.remove(k)
+            }
+        }
+        if self.plug.asking and self.plug.asks[0].host.spec.name == name {
+            self.plug.asking = false
+            if self.mode == "picker" or self.mode == "prompt" {
+                self.mode = "normal"
+            }
+        }
+        self.plug.asks = self.plug.asks.filter(a => a.host.spec.name != name)
+    }
+
+    fun ask_title(self) -> str = self.plug.asks[0].title if self.plug.asking else ""
+
+    fun remove_panel(self, i: int) {
+        let _ = self.plug.panels.remove_at(i)
+        if self.plug.focus == i {
+            self.plug.focus = 0 - 1
+            self.mode = self.plug.mode_before
+        } else if self.plug.focus > i {
+            self.plug.focus -= 1
+        }
+    }
+
+    fun panel_host(self, p: PanelState) -> Option[PluginProc] = self.host_named(p.owner)
+
+    fun send_panel_event(self, p: PanelState, block: str, kind: str, value: JsonValue) {
+        match self.panel_host(p) {
+            case Some(h) { h.send_event(p.spec.id, block, kind, value) }
+            case None {}
+        }
+    }
+
+    // Close a panel from dusk's side and tell its plugin.
+    fun close_panel_at(self, i: int) {
+        let p = self.plug.panels[i]
+        self.remove_panel(i)
+        self.send_panel_event(p, "", "closed", JsonValue.Null)
+    }
+
+    fun close_focused_panel(self) {
+        let n = len(self.plug.panels)
+        if n == 0 {
+            self.fail("no plugin panels")
+            return
+        }
+        self.close_panel_at(self.plug.focus if self.plug.focus >= 0 else n - 1)
+    }
+
+    fun focus_panel(self, i: int) {
+        if i < 0 {
+            if self.plug.focus >= 0 {
+                self.mode = self.plug.mode_before
+            }
+            self.plug.focus = 0 - 1
+            return
+        }
+        if self.plug.focus < 0 {
+            self.plug.mode_before = self.mode if self.mode != "panel" else "normal"
+        }
+        self.plug.focus = i
+        self.mode = "panel"
+    }
+
+    // F6 order: editor, each panel, editor again.
+    fun cycle_focus(self, dir: int) {
+        let n = len(self.plug.panels)
+        let at = self.plug.focus + 1
+        let next = (at + dir + n + 1) % (n + 1)
+        self.focus_panel(next - 1)
+    }
+
+    fun panel_size(self, i: int) -> (int, int) {
+        if i < len(self.plug.rects) {
+            let (x, y, w, h) = self.plug.rects[i]
+            return (max(1, w - 2), max(1, h - 1))
+        }
+        return (40, 10)
+    }
+
+    fun panel_input(self, k: Key, name: str) {
+        let i = self.plug.focus
+        if i < 0 or i >= len(self.plug.panels) {
+            self.focus_panel(0 - 1)
+            return
+        }
+        if name == "esc" {
+            self.focus_panel(0 - 1)
+            return
+        }
+        let p = self.plug.panels[i]
+        let typed = match k {
+            case Char(c) { c }
+            case _ { "" }
+        }
+        // Ctrl keys keep their global meaning (save, quit, close, open),
+        // except Ctrl+N, which adds a line in an input.
+        let in_input = p.focus_block >= 0 and p.focus_block < len(p.spec.blocks) and p.spec.blocks[p.focus_block].kind == "input"
+        if name.starts_with("ctrl+") and not (name == "ctrl+n" and in_input) {
+            let cmd = self.lookup("global", name)
+            if cmd != "" {
+                self.run(cmd, 1)
+                return
+            }
+        }
+        let ev = panel_key(p, name, typed)
+        let (w, h) = self.panel_size(i)
+        let typing = in_input and (typed != "" or name == "backspace" or name == "enter" or name == "ctrl+n")
+        if has_selection(p) or typing {
+            keep_in_view(p, w, h)
+        }
+        if ev.kind != "" {
+            self.send_panel_event(p, ev.block, ev.kind, ev.value)
+        }
+    }
+
+    // Panels take focus from editing modes, never from a picker, prompt,
+    // help screen, or question, which keep the keyboard until answered.
+    fun can_focus_panels(self) -> bool {
+        let m = self.mode
+        return m == "normal" or m == "insert" or m == "visual" or m == "vline" or m == "tree" or m == "panel"
+    }
+
+    fun panel_at(self, x: int, y: int) -> int {
+        for i in range(len(self.plug.rects)) {
+            let (rx, ry, rw, rh) = self.plug.rects[i]
+            if x >= rx and x < rx + rw and y >= ry and y < ry + rh {
+                return i
+            }
+        }
+        return 0 - 1
+    }
+
+    // Clicks and the wheel over a panel. True when the panel took the event.
+    fun panel_mouse(self, m: MouseEvent, x: int, y: int) -> bool {
+        if not self.can_focus_panels() {
+            return false
+        }
+        let i = self.panel_at(x, y)
+        if i < 0 or i >= len(self.plug.panels) {
+            match m.kind {
+                case Down {
+                    if self.mode == "panel" {
+                        self.focus_panel(0 - 1)
+                    }
+                }
+                case _ {}
+            }
+            return false
+        }
+        let p = self.plug.panels[i]
+        let (rx, ry, rw, rh) = self.plug.rects[i]
+        match m.kind {
+            case ScrollDown {
+                p.scroll += 3
+            }
+            case ScrollUp {
+                p.scroll = max(0, p.scroll - 3)
+            }
+            case Down {
+                if y == ry and x >= rx + rw - 3 {
+                    self.close_panel_at(i)
+                    return true
+                }
+                self.focus_panel(i)
+                let rows = layout(p, max(1, rw - 2), max(1, rh - 1), self.plug.frame)
+                let r = y - ry - 1
+                if r >= 0 and r < len(rows) {
+                    let row = rows[r]
+                    let b = p.spec.blocks[row.block]
+                    if b.kind == "list" or b.kind == "input" or b.kind == "buttons" {
+                        p.focus_block = row.block
+                    }
+                    for k in range(len(row.hits)) {
+                        let (a, z) = row.hits[k]
+                        let col = x - rx - 2
+                        if col >= a and col < z {
+                            p.sel.set(b.id, k)
+                            self.send_panel_event(p, b.id, "press", jint(k))
+                        }
+                    }
+                    if row.item >= 0 {
+                        let again = p.sel.get(b.id).unwrap_or(0 - 1) == row.item
+                        p.sel.set(b.id, row.item)
+                        if again {
+                            self.send_panel_event(p, b.id, "choose", jint(row.item))
+                        }
+                    }
+                }
+            }
+            case _ {}
+        }
+        return true
     }
 }

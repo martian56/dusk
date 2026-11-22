@@ -7,6 +7,7 @@
 
 from std.env import args, exit
 from std.sync import sleep_millis
+from std.fs import write
 from std.io import read_line, print
 from std.json import JsonValue, parse, stringify, json_int, json_string, json_object, json_array
 
@@ -50,6 +51,51 @@ fun int_of(v: JsonValue, key: str) -> int {
     }
 }
 
+fun block(pairs: list[(str, JsonValue)]) -> JsonValue = obj(pairs)
+
+fun panel(dock: str) -> JsonValue {
+    let rows = json_array(
+        [s("one.rv"), obj([("label", s("two.rv")), ("detail", s("2 hits"))]), s("three.rv")],
+    )
+    let blocks = json_array(
+        [
+            block(
+                [
+                    ("id", s("intro")),
+                    ("kind", s("text")),
+                    ("text", s("# Results\nSome **bold** text")),
+                ],
+            ),
+            block([("id", s("files")), ("kind", s("list")), ("items", rows)]),
+            block([("id", s("ask")), ("kind", s("input"))]),
+            block(
+                [
+                    ("id", s("act")),
+                    ("kind", s("buttons")),
+                    ("items", json_array([s("Run"), s("Stop")])),
+                ],
+            ),
+            block(
+                [
+                    ("id", s("busy")),
+                    ("kind", s("progress")),
+                    ("text", s("working")),
+                    ("value", json_int(50)),
+                ],
+            ),
+            block([("id", s("odd")), ("kind", s("sparkles"))]),
+        ],
+    )
+    return obj(
+        [
+            ("id", s("p1")),
+            ("title", s("Fake")),
+            ("dock", s(dock if dock != "" else "right")),
+            ("blocks", blocks),
+        ],
+    )
+}
+
 fun contributions() -> JsonValue {
     let cmds: list[JsonValue] = []
     for (n, t) in [
@@ -57,6 +103,13 @@ fun contributions() -> JsonValue {
         ("fake.edit", "Insert X"),
         ("fake.count", "Count chars"),
         ("fake.die", "Exit"),
+        ("fake.panel", "Show a panel"),
+        ("fake.pick", "Pick one"),
+        ("fake.prompt", "Ask for text"),
+        ("fake.marks", "Mark row 0"),
+        ("fake.close", "Close the panel"),
+        ("fake.touch", "Change the file on disk"),
+        ("fake.sel", "Echo the selection"),
     ] {
         cmds.push(obj([("name", s(n)), ("title", s(t))]))
     }
@@ -111,6 +164,17 @@ fun handle(st: State, line: str) -> bool {
                 let (purpose, answer) = p
                 let _ = st.pending.remove(id)
                 let res = v.get("result").unwrap_or(JsonValue.Null)
+                if purpose == "pick" {
+                    notify("ui/message", obj([("text", s("picked ${str_of(res, "label")}"))]))
+                }
+                if purpose == "prompt" {
+                    let cancelled = match res.get("cancelled") {
+                        case Some(c) { c.as_bool().unwrap_or(false) }
+                        case None { false }
+                    }
+                    let said = "cancelled" if cancelled else "typed ${str_of(res, "text")}"
+                    notify("ui/message", obj([("text", s(said))]))
+                }
                 if purpose == "count" {
                     notify(
                         "status/set",
@@ -130,6 +194,13 @@ fun handle(st: State, line: str) -> bool {
     } else if method == "shutdown" {
         reply(id, obj([]))
         return false
+    } else if method == "ui/event" {
+        let value = match params.get("value") {
+            case Some(v) { stringify(v) }
+            case None { "" }
+        }
+        let text = "event ${str_of(params, "panel")} ${str_of(params, "block")} ${str_of(params, "kind")} ${value}"
+        notify("ui/message", obj([("text", s(text))]))
     } else if method == "buffer/opened" or method == "buffer/changed" {
         ask(st, "buffer/text", obj([("path", s(str_of(params, "path")))]), "count", 0 - 1)
     } else if method == "command/run" {
@@ -149,6 +220,37 @@ fun handle(st: State, line: str) -> bool {
                 ],
             )
             ask(st, "buffer/edit", p, "edit", id)
+        } else if cmd == "fake.panel" {
+            notify("ui/panel", panel(str_of(params, "dock")))
+            reply(id, obj([]))
+        } else if cmd == "fake.close" {
+            notify("ui/close", obj([("id", s("p1"))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.pick" {
+            let items = json_array([s("a"), obj([("label", s("b")), ("detail", s("second"))]), s("c")])
+            ask(st, "ui/pick", obj([("title", s("Pick")), ("items", items)]), "pick", id)
+        } else if cmd == "fake.prompt" {
+            ask(st, "ui/prompt", obj([("title", s("Name")), ("text", s("x"))]), "prompt", id)
+        } else if cmd == "fake.marks" {
+            let m = obj(
+                [
+                    ("row", json_int(0)),
+                    ("severity", s("error")),
+                    ("message", s("bad line")),
+                    ("sign", s("E")),
+                ],
+            )
+            let far = obj([("row", json_int(999)), ("severity", s("warning")), ("message", s("far"))])
+            notify("marks/set", obj([("path", s(str_of(params, "path"))), ("marks", json_array([m, far]))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.sel" {
+            notify("ui/message", obj([("text", s("sel ${str_of(params, "selection")}"))]))
+            reply(id, obj([]))
+        } else if cmd == "fake.touch" {
+            let path = str_of(params, "path")
+            let _ = write(path, "changed on disk\n")
+            notify("files/changed", obj([("paths", json_array([s(path)]))]))
+            reply(id, obj([]))
         } else if cmd == "fake.die" {
             exit(4)
         } else if cmd == "fake.count" {
@@ -191,7 +293,7 @@ fun main() {
             }
             if mode == "deaf" or mode == "bigline" {
                 if mode == "bigline" {
-                    print("x" * 9000000)
+                    print("x" * 9000000 + "\n")
                 }
                 while true {
                     sleep_millis(1000)

@@ -272,6 +272,8 @@ class ScriptEvent {
     is_mouse: bool
     key: Key
     mouse: MouseEvent
+    // `<sleep:ms>`: wait this long, letting plugins answer.
+    sleep_ms: int = 0
 }
 
 fun named_key(name: str) -> Option[Key] {
@@ -360,7 +362,7 @@ fun mouse_at(kind: MouseKind, button: int, spec: str) -> Option[MouseEvent] {
 }
 
 // `ihello<esc>:w<cr>`, `<c-s>`, `<click:10,4>`, `<drag:12,4>`,
-// `<release:12,4>`, `<wheeldown:10,4>`, `<wheelup:10,4>`.
+// `<release:12,4>`, `<wheeldown:10,4>`, `<wheelup:10,4>`, `<sleep:500>`.
 fun parse_script(s: str) -> list[ScriptEvent] {
     let out: list[ScriptEvent] = []
     let cs = s.chars()
@@ -380,6 +382,17 @@ fun parse_script(s: str) -> list[ScriptEvent] {
                     let what = name.substring(0, colon)
                     let spec = name.substring(colon + 1, name.length())
                     var ev: Option[MouseEvent] = None
+                    if what == "sleep" {
+                        match spec.trim().parse_int() {
+                            case Some(ms) {
+                                let blank = MouseEvent(kind: MouseKind.Move, button: 0 - 1, x: 0, y: 0)
+                                out.push(ScriptEvent(is_mouse: false, key: Key.Esc, mouse: blank, sleep_ms: ms))
+                                i = j + 1
+                                continue
+                            }
+                            case None {}
+                        }
+                    }
                     if what == "click" {
                         ev = mouse_at(MouseKind.Down, 0, spec)
                     } else if what == "drag" {

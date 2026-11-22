@@ -1,0 +1,126 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from "./host" import Block, PanelSpec
+from "./ui" import PanelState, Row, new_panel, replace_panel, layout, panel_key
+
+fun spec(blocks: list[Block]) -> PanelSpec = PanelSpec(
+    id: "p1",
+    title: "T",
+    dock: "right",
+    blocks: blocks,
+)
+
+fun files() -> Block = Block(
+    id: "files",
+    kind: "list",
+    items: [("one.rv", ""), ("two.rv", "2 hits"), ("three.rv", "")],
+)
+
+fun texts(rows: list[Row]) -> list[str] = rows.map(r => r.text)
+
+fun test_layout_orders_blocks_and_wraps_text() {
+    let p = new_panel(
+        "fake",
+        spec(
+            [
+                Block(id: "intro", kind: "text", text: "# Results\nalpha beta gamma delta epsilon"),
+                files(),
+                Block(id: "act", kind: "buttons", items: [("Run", ""), ("Stop", "")]),
+                Block(id: "busy", kind: "progress", text: "working", value: 50),
+            ],
+        ),
+    )
+    let rows = layout(p, 16, 100, 0)
+    let all = "|".join(texts(rows))
+    assert_true(all.index_of("Results") < all.index_of("one.rv"))
+    assert_true(all.index_of("one.rv") < all.index_of("Run"))
+    assert_true(all.contains("two.rv  2 hits"))
+    assert_true(all.contains("50%"))
+    for r in rows {
+        assert_true(r.text.chars().len() <= 16)
+    }
+}
+
+fun test_list_selection_moves_and_chooses() {
+    let p = new_panel("fake", spec([files()]))
+    let _ = panel_key(p, "down", "")
+    let ev = panel_key(p, "enter", "")
+    assert_eq_str(ev.block, "files")
+    assert_eq_str(ev.kind, "choose")
+    assert_eq_int(ev.value.as_int().unwrap_or(0 - 1), 1)
+    let rows = layout(p, 30, 100, 0)
+    assert_true(rows.any(r => r.kind == "item_sel" and r.text.starts_with("two.rv")))
+}
+
+fun test_input_edits_and_submits() {
+    let p = new_panel("fake", spec([Block(id: "ask", kind: "input")]))
+    for c in ["h", "i"] {
+        let _ = panel_key(p, c, c)
+    }
+    let _ = panel_key(p, "backspace", "")
+    let _ = panel_key(p, "o", "o")
+    let ev = panel_key(p, "enter", "")
+    assert_eq_str(ev.kind, "submit")
+    assert_eq_str(ev.value.as_string().unwrap_or(""), "ho")
+    assert_eq_str(p.input.get("ask").unwrap_or("?"), "")
+}
+
+fun test_ctrl_n_inserts_newline() {
+    let p = new_panel("fake", spec([Block(id: "ask", kind: "input")]))
+    let _ = panel_key(p, "a", "a")
+    let none = panel_key(p, "ctrl+n", "")
+    assert_eq_str(none.kind, "")
+    let _ = panel_key(p, "b", "b")
+    assert_eq_str(p.input.get("ask").unwrap_or(""), "a\nb")
+    assert_eq_int(layout(p, 20, 100, 0).count(r => r.kind == "input"), 2)
+}
+
+fun test_replace_keeps_typed_input_and_selection() {
+    let p = new_panel("fake", spec([files(), Block(id: "ask", kind: "input")]))
+    let _ = panel_key(p, "down", "")
+    let _ = panel_key(p, "tab", "")
+    let _ = panel_key(p, "x", "x")
+    let q = replace_panel(p, spec([files(), Block(id: "ask", kind: "input")]))
+    assert_eq_int(q.sel.get("files").unwrap_or(0), 1)
+    assert_eq_str(q.input.get("ask").unwrap_or(""), "x")
+    assert_eq_int(q.focus_block, 1)
+    let shorter = replace_panel(q, spec([Block(id: "files", kind: "list", items: [("only", "")])]))
+    assert_eq_int(shorter.sel.get("files").unwrap_or(0), 0)
+}
+
+fun test_long_list_layout_is_bounded() {
+    let many: list[(str, str)] = []
+    for i in range(10000) {
+        many.push(("row ${i}", ""))
+    }
+    let p = new_panel("fake", spec([Block(id: "big", kind: "list", items: many)]))
+    p.scroll = 5000
+    let rows = layout(p, 30, 20, 0)
+    assert_true(len(rows) <= 20)
+    assert_true(rows[0].text.starts_with("row 5000"))
+}
+
+fun test_replaced_panel_follows_the_bottom() {
+    let p = new_panel(
+        "fake",
+        spec(
+            [
+                Block(id: "t", kind: "text", text: "a\n\nb\n\nc\n\nd\n\ne"),
+                Block(id: "ask", kind: "input"),
+            ],
+        ),
+    )
+    p.scroll = 1000
+    let first = layout(p, 30, 4, 0)
+    assert_eq_str(first[len(first) - 1].kind, "input")
+    let q = replace_panel(
+        p,
+        spec(
+            [
+                Block(id: "t", kind: "text", text: "a\n\nb\n\nc\n\nd\n\ne\n\nf\n\ng\n\nh"),
+                Block(id: "ask", kind: "input"),
+            ],
+        ),
+    )
+    let rows = layout(q, 30, 4, 0)
+    assert_eq_str(rows[len(rows) - 1].kind, "input")
+}
