@@ -202,3 +202,13 @@ fun test_save_and_close_send_events() {
     let _ = remove_file(a)
     let _ = remove_file(b)
 }
+
+fun test_plugin_log_opens_a_buffer() {
+    let ed = editor("garbage", [])
+    assert_true(wait_for(ed, 5000, e => e.message.contains("protocol error")))
+    ed.ex("plugin log fake")
+    assert_true(ed.doc().text().contains("this is not json"))
+    ed.ex("plugin log nobody")
+    assert_true(ed.message.contains("no plugin nobody"))
+    ed.shutdown_plugins()
+}

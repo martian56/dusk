@@ -1931,6 +1931,8 @@ impl Ed {
             } else if len(items) > 0 {
                 self.open_picker("commands", items)
             }
+        } else if head == "plugin" and arg.starts_with("log") {
+            self.show_plugin_log(arg.substring(3, arg.length()).trim())
         } else if head == "sort" {
             if not ranged {
                 r1 = 0
@@ -3106,6 +3108,24 @@ impl Ed {
                 h.notify("buffer/opened", obj([("path", jstr(d.path))]))
                 self.plug.versions.set(d.path, d.version)
             }
+        }
+    }
+
+    // A plugin's log (its stderr and dusk's notes about it) in a new buffer.
+    fun show_plugin_log(self, name: str) {
+        match self.host_named(name) {
+            case Some(h) {
+                let lines: list[str] = h.log.copy()
+                if len(lines) == 0 {
+                    lines.push("")
+                }
+                let d = open_doc("", -1)
+                d.lines = lines
+                self.docs.push(d)
+                self.cur = len(self.docs) - 1
+                self.say("log of ${name} (${len(h.log)} lines)")
+            }
+            case None { self.fail("no plugin ${name}") }
         }
     }
 
