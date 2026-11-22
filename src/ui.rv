@@ -1,0 +1,387 @@
+// Plugin panels: their state (selection, typed input, scroll, focus) and the
+// layout of their blocks into rows. Drawing is in view.rv.
+
+from std.json import JsonValue, json_int, json_string
+from "github.com/martian56/plumage/text" import Span
+from "github.com/martian56/magpie" import render
+from "github.com/martian56/magpie/theme" import default_theme
+from "./host" import Block, PanelSpec
+
+let SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+class PanelState {
+    owner: str
+    spec: PanelSpec
+    scroll: int = 0
+    // Block id -> selected row (lists) or button (buttons).
+    sel: dict[str, int] = {}
+    // Block id -> typed text and cursor (in characters) of an input block.
+    input: dict[str, str] = {}
+    cursor: dict[str, int] = {}
+    // Index into spec.blocks of the focused list, input, or buttons block.
+    focus_block: int = 0 - 1
+}
+
+// One laid-out row. `spans` carries markdown styling for text rows; the
+// other kinds are styled by the view from `kind`.
+class Row {
+    text: str
+    // "title", "text", "item", "item_sel", "input", "button", "progress", "gap".
+    kind: str
+    block: int
+    item: int = 0 - 1
+    spans: list[Span] = []
+    // Cursor column within an input row, -1 when the cursor is elsewhere.
+    cursor: int = 0 - 1
+}
+
+// What a key did in a panel: an event for the plugin, or kind "" for none.
+class PanelEvent {
+    block: str
+    kind: str
+    value: JsonValue
+}
+
+fun no_event() -> PanelEvent = PanelEvent(block: "", kind: "", value: JsonValue.Null)
+
+fun selectable(b: Block) -> bool = b.kind == "list" or b.kind == "input" or b.kind == "buttons"
+
+fun first_selectable(spec: PanelSpec) -> int {
+    for i in range(len(spec.blocks)) {
+        if selectable(spec.blocks[i]) {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+fun new_panel(owner: str, spec: PanelSpec) -> PanelState {
+    let p = PanelState(owner: owner, spec: spec, focus_block: first_selectable(spec))
+    for b in spec.blocks {
+        if b.kind == "input" {
+            p.input.set(b.id, b.text)
+            p.cursor.set(b.id, b.text.chars().len())
+        }
+    }
+    return p
+}
+
+// The same panel with new content: scroll, focus, selections still in
+// range, and input the plugin did not overwrite all carry over.
+fun replace_panel(old: PanelState, spec: PanelSpec) -> PanelState {
+    let p = new_panel(old.owner, spec)
+    p.scroll = old.scroll
+    var focused_id = ""
+    if old.focus_block >= 0 and old.focus_block < len(old.spec.blocks) {
+        focused_id = old.spec.blocks[old.focus_block].id
+    }
+    for i in range(len(spec.blocks)) {
+        let b = spec.blocks[i]
+        match old.sel.get(b.id) {
+            case Some(s) {
+                if s < len(b.items) {
+                    p.sel.set(b.id, s)
+                }
+            }
+            case None {}
+        }
+        if b.kind == "input" and b.text == "" {
+            match old.input.get(b.id) {
+                case Some(t) {
+                    p.input.set(b.id, t)
+                    p.cursor.set(b.id, old.cursor.get(b.id).unwrap_or(t.chars().len()))
+                }
+                case None {}
+            }
+        }
+        if b.id == focused_id and selectable(b) {
+            p.focus_block = i
+        }
+    }
+    return p
+}
+
+fun clip(s: str, w: int) -> str {
+    let cs = s.chars()
+    if len(cs) <= w {
+        return s
+    }
+    return "".join(cs.slice(0, max(0, w)))
+}
+
+fun text_rows(b: Block, bi: int, w: int) -> list[Row] {
+    let out: list[Row] = []
+    for line in render(b.text, w, default_theme()) {
+        var t = ""
+        for sp in line.spans {
+            t += sp.text
+        }
+        out.push(Row(text: clip(t, w), kind: "text", block: bi, spans: line.spans))
+    }
+    return out
+}
+
+fun bar(value: int) -> str {
+    let v = max(0, min(100, value))
+    let filled = v / 10
+    return "[" + "#" * filled + "-" * (10 - filled) + "] ${v}%"
+}
+
+fun input_rows(p: PanelState, b: Block, bi: int, w: int) -> list[Row] {
+    let out: list[Row] = []
+    let text = p.input.get(b.id).unwrap_or("")
+    let cur = p.cursor.get(b.id).unwrap_or(0)
+    let focused = p.focus_block == bi
+    var before = 0
+    let lines = text.split("\n")
+    for i in range(len(lines)) {
+        let n = lines[i].chars().len()
+        let lead = "> " if i == 0 else "  "
+        var col = 0 - 1
+        if focused and cur >= before and cur <= before + n {
+            col = 2 + cur - before
+        }
+        out.push(Row(text: clip(lead + lines[i], w), kind: "input", block: bi, cursor: min(col, w - 1)))
+        before += n + 1
+    }
+    return out
+}
+
+// Rows of one block; a list yields only rows [from, to) of its items.
+fun block_rows(
+    p: PanelState,
+    b: Block,
+    bi: int,
+    w: int,
+    tick: int,
+    from: int,
+    to: int,
+) -> list[Row] {
+    let out: list[Row] = []
+    if b.kind == "text" {
+        return text_rows(b, bi, w)
+    }
+    if b.kind == "list" {
+        if len(b.items) == 0 {
+            out.push(Row(text: "(empty)", kind: "text", block: bi))
+            return out
+        }
+        let sel = p.sel.get(b.id).unwrap_or(0)
+        for i in range(max(0, from), min(to, len(b.items))) {
+            let (label, detail) = b.items[i]
+            let text = label if detail == "" else "${label}  ${detail}"
+            out.push(Row(text: clip(text, w), kind: "item_sel" if i == sel else "item", block: bi, item: i))
+        }
+        return out
+    }
+    if b.kind == "input" {
+        return input_rows(p, b, bi, w)
+    }
+    if b.kind == "buttons" {
+        let sel = p.sel.get(b.id).unwrap_or(0)
+        var t = ""
+        for i in range(len(b.items)) {
+            let (label, detail) = b.items[i]
+            let shown = "‹ ${label} ›" if i == sel and p.focus_block == bi else "[ ${label} ]"
+            t += shown + " "
+        }
+        out.push(Row(text: clip(t.trim_end(), w), kind: "button", block: bi))
+        return out
+    }
+    let label = b.text
+    let line = "${bar(b.value)} ${label}" if b.value >= 0 else "${SPINNER[tick % len(SPINNER)]} ${label}"
+    out.push(Row(text: clip(line, w), kind: "progress", block: bi))
+    return out
+}
+
+fun block_height(p: PanelState, b: Block, bi: int, w: int) -> int {
+    if b.kind == "list" {
+        return max(1, len(b.items))
+    }
+    if b.kind == "text" {
+        return len(render(b.text, w, default_theme()))
+    }
+    if b.kind == "input" {
+        return len(p.input.get(b.id).unwrap_or("").split("\n"))
+    }
+    return 1
+}
+
+// The rows visible at the panel's scroll, at most `h` of them. Blocks are
+// separated by a blank row.
+fun layout(p: PanelState, w: int, h: int, tick: int) -> list[Row] {
+    let out: list[Row] = []
+    var y = 0
+    for bi in range(len(p.spec.blocks)) {
+        if len(out) >= h {
+            break
+        }
+        let b = p.spec.blocks[bi]
+        if bi > 0 {
+            if y >= p.scroll {
+                out.push(Row(text: "", kind: "gap", block: bi))
+            }
+            y += 1
+        }
+        let bh = block_height(p, b, bi, w)
+        if y + bh <= p.scroll {
+            y += bh
+            continue
+        }
+        let skip = max(0, p.scroll - y)
+        let rows = block_rows(p, b, bi, w, tick, skip, skip + h - len(out))
+        // A list already skipped its hidden rows; other blocks skip here.
+        let start = 0 if b.kind == "list" else skip
+        for i in range(start, len(rows)) {
+            if len(out) >= h {
+                break
+            }
+            out.push(rows[i])
+        }
+        y += bh
+    }
+    return out
+}
+
+// The row offset of a block's selected row, for keeping it in view.
+fun row_of_selection(p: PanelState, w: int) -> int {
+    var y = 0
+    for bi in range(len(p.spec.blocks)) {
+        let b = p.spec.blocks[bi]
+        if bi > 0 {
+            y += 1
+        }
+        if bi == p.focus_block {
+            return y + (p.sel.get(b.id).unwrap_or(0) if b.kind == "list" else 0)
+        }
+        y += block_height(p, b, bi, w)
+    }
+    return 0
+}
+
+fun keep_in_view(p: PanelState, w: int, h: int) {
+    let r = row_of_selection(p, w)
+    if r < p.scroll {
+        p.scroll = r
+    } else if r >= p.scroll + h {
+        p.scroll = r - h + 1
+    }
+}
+
+fun move_focus(p: PanelState, dir: int) {
+    let n = len(p.spec.blocks)
+    if n == 0 {
+        return
+    }
+    var i = p.focus_block
+    for step in range(n) {
+        i = (i + dir + n) % n
+        if selectable(p.spec.blocks[i]) {
+            p.focus_block = i
+            return
+        }
+    }
+}
+
+// Apply a key to the focused block. `text` is the typed character, or ""
+// for keys that are not characters.
+fun panel_key(p: PanelState, name: str, text: str) -> PanelEvent {
+    if name == "tab" {
+        move_focus(p, 1)
+        return no_event()
+    }
+    if name == "shift+tab" {
+        move_focus(p, 0 - 1)
+        return no_event()
+    }
+    if p.focus_block < 0 or p.focus_block >= len(p.spec.blocks) {
+        if name == "down" {
+            p.scroll += 1
+        } else if name == "up" {
+            p.scroll = max(0, p.scroll - 1)
+        }
+        return no_event()
+    }
+    let b = p.spec.blocks[p.focus_block]
+    if b.kind == "list" {
+        let n = len(b.items)
+        let sel = p.sel.get(b.id).unwrap_or(0)
+        var next = sel
+        if name == "down" {
+            next = sel + 1
+        } else if name == "up" {
+            next = sel - 1
+        } else if name == "pagedown" {
+            next = sel + 10
+        } else if name == "pageup" {
+            next = sel - 10
+        } else if name == "home" {
+            next = 0
+        } else if name == "end" {
+            next = n - 1
+        } else if name == "enter" and n > 0 {
+            return PanelEvent(block: b.id, kind: "choose", value: json_int(sel))
+        }
+        p.sel.set(b.id, max(0, min(n - 1, next)))
+        return no_event()
+    }
+    if b.kind == "buttons" {
+        let n = len(b.items)
+        let sel = p.sel.get(b.id).unwrap_or(0)
+        if name == "right" {
+            p.sel.set(b.id, min(n - 1, sel + 1))
+        } else if name == "left" {
+            p.sel.set(b.id, max(0, sel - 1))
+        } else if name == "enter" and n > 0 {
+            return PanelEvent(block: b.id, kind: "press", value: json_int(sel))
+        }
+        return no_event()
+    }
+    let cs = p.input.get(b.id).unwrap_or("").chars()
+    let cur = max(0, min(len(cs), p.cursor.get(b.id).unwrap_or(len(cs))))
+    if name == "enter" {
+        let sent = "".join(cs)
+        p.input.set(b.id, "")
+        p.cursor.set(b.id, 0)
+        return PanelEvent(block: b.id, kind: "submit", value: json_string(sent))
+    }
+    var insert = text
+    if name == "ctrl+n" or name == "alt+enter" {
+        insert = "\n"
+    }
+    if insert != "" {
+        let out = "".join(cs.slice(0, cur)) + insert + "".join(cs.slice(cur, len(cs)))
+        p.input.set(b.id, out)
+        p.cursor.set(b.id, cur + insert.chars().len())
+    } else if name == "backspace" and cur > 0 {
+        p.input.set(b.id, "".join(cs.slice(0, cur - 1)) + "".join(cs.slice(cur, len(cs))))
+        p.cursor.set(b.id, cur - 1)
+    } else if name == "delete" and cur < len(cs) {
+        p.input.set(b.id, "".join(cs.slice(0, cur)) + "".join(cs.slice(cur + 1, len(cs))))
+    } else if name == "left" {
+        p.cursor.set(b.id, max(0, cur - 1))
+    } else if name == "right" {
+        p.cursor.set(b.id, min(len(cs), cur + 1))
+    } else if name == "home" {
+        p.cursor.set(b.id, 0)
+    } else if name == "end" {
+        p.cursor.set(b.id, len(cs))
+    }
+    return no_event()
+}
+
+// Text to insert into an input when pasting.
+fun paste_into(p: PanelState, text: str) {
+    if p.focus_block < 0 or p.focus_block >= len(p.spec.blocks) {
+        return
+    }
+    let b = p.spec.blocks[p.focus_block]
+    if b.kind != "input" {
+        return
+    }
+    let cs = p.input.get(b.id).unwrap_or("").chars()
+    let cur = max(0, min(len(cs), p.cursor.get(b.id).unwrap_or(len(cs))))
+    let clean = text.replace("\r\n", "\n")
+    p.input.set(b.id, "".join(cs.slice(0, cur)) + clean + "".join(cs.slice(cur, len(cs))))
+    p.cursor.set(b.id, cur + clean.chars().len())
+}
