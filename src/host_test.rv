@@ -151,3 +151,29 @@ fun test_huge_line_is_stopped() {
     let got = pump(p, 10000, "failed:")
     assert_true(has(got, "failed:flooding"))
 }
+
+fun run_and_collect(mode: str, cmd: str, want: str) -> list[str] {
+    let p = start_plugin(fake(mode), ".")
+    let _ = pump(p, 5000, "bind:")
+    p.run_command(cmd, obj([("path", jstr("a.rv"))]), now_millis())
+    let got = pump(p, 5000, want)
+    p.shutdown()
+    return got
+}
+
+fun test_panel_message_parses_every_block_kind() {
+    let got = run_and_collect("echo", "fake.panel", "panel:")
+    // Six blocks sent; the unknown "sparkles" block is dropped.
+    assert_true(has(got, "panel:p1:5"))
+    let closed = run_and_collect("echo", "fake.close", "close:")
+    assert_true(has(closed, "close:p1"))
+}
+
+fun test_pick_and_prompt_are_requests() {
+    assert_true(has(run_and_collect("echo", "fake.pick", "pick:"), "pick:Pick:3"))
+    assert_true(has(run_and_collect("echo", "fake.prompt", "prompt:"), "prompt:Name"))
+}
+
+fun test_marks_parse_rows_and_severity() {
+    assert_true(has(run_and_collect("echo", "fake.marks", "marks:"), "marks:a.rv:2"))
+}

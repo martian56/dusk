@@ -3440,6 +3440,9 @@ impl Ed {
                     case None {}
                 }
             }
+            case _ { self.apply_ui(from, a) }
         }
     }
+
+    fun apply_ui(self, from: Option[PluginProc], a: HostAction) {}
 }
