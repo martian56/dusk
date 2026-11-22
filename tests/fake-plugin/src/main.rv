@@ -293,7 +293,7 @@ fun main() {
             }
             if mode == "deaf" or mode == "bigline" {
                 if mode == "bigline" {
-                    print("x" * 9000000)
+                    print("x" * 9000000 + "\n")
                 }
                 while true {
                     sleep_millis(1000)
