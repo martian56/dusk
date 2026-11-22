@@ -5,7 +5,7 @@
 from std.json import JsonValue
 from std.process import Child, start
 from std.time import now_millis
-from std.sync import sleep_millis
+from std.sync import Mutex, mutex, sleep_millis
 from "./rpc" import (
     LineReader,
     parse_msg,
@@ -28,6 +28,10 @@ let MAX_PER_POLL = 1000
 let BUSY_PER_POLL = 200
 let BUSY_POLLS = 5
 let MAX_LOG = 500
+// Bytes waiting to be written to a plugin that is not reading its input.
+let MAX_OUTBOX = 1048576
+// Bytes of output buffered without a complete line, or read in one poll.
+let MAX_INBOX = 8388608
 
 class PluginSpec {
     name: str
@@ -72,6 +76,43 @@ class Pending {
     sent: int
 }
 
+// Lines waiting for the writer goroutine. Writing to a pipe blocks once a
+// plugin stops reading, so the editor never writes itself.
+class Outbox {
+    lock: Mutex
+    lines: list[str] = []
+    bytes: int = 0
+    closed: bool = false
+}
+
+fun new_outbox() -> Outbox = Outbox(lock: mutex())
+
+fun write_loop(ob: Outbox, child: Child) {
+    while true {
+        ob.lock.lock()
+        let batch = ob.lines
+        ob.lines = []
+        let closed = ob.closed
+        ob.lock.unlock()
+        if len(batch) == 0 {
+            if closed {
+                return
+            }
+            sleep_millis(5)
+            continue
+        }
+        for line in batch {
+            let ok = child.write_stdin(line)
+            ob.lock.lock()
+            ob.bytes -= line.length()
+            ob.lock.unlock()
+            if not ok {
+                return
+            }
+        }
+    }
+}
+
 class PluginProc {
     spec: PluginSpec
     root: str
@@ -87,6 +128,7 @@ class PluginProc {
     err: LineReader = LineReader("")
     reported: bool = false
     busy: int = 0
+    outbox: Outbox = new_outbox()
 }
 
 fun start_plugin(spec: PluginSpec, root: str) -> PluginProc {
@@ -183,6 +225,12 @@ impl PluginProc {
             case Ok(c) {
                 self.child = c
                 self.state = "running"
+                self.close_outbox()
+                self.outbox = new_outbox()
+                let ob = self.outbox
+                spawn {
+                    write_loop(ob, c)
+                }
                 self.out = LineReader("")
                 self.err = LineReader("")
                 self.busy = 0
@@ -202,9 +250,44 @@ impl PluginProc {
     }
 
     fun send(self, line: str) {
-        if self.state == "running" {
-            let _ = self.child.write_stdin(line)
+        if self.state != "running" {
+            return
         }
+        let ob = self.outbox
+        ob.lock.lock()
+        let full = ob.bytes + line.length() > MAX_OUTBOX
+        if not full {
+            ob.lines.push(line)
+            ob.bytes += line.length()
+        }
+        ob.lock.unlock()
+        if full {
+            self.fail("not reading its input")
+        }
+    }
+
+    fun close_outbox(self) {
+        let ob = self.outbox
+        ob.lock.lock()
+        ob.closed = true
+        ob.lines = []
+        ob.lock.unlock()
+    }
+
+    // Relaunch an exited plugin, up to MAX_RESTARTS times. True when it
+    // restarted, so the caller can replay what the new process missed.
+    fun ensure_running(self) -> bool {
+        if self.state != "exited" {
+            return false
+        }
+        if self.restarts >= MAX_RESTARTS {
+            self.fail("exited after ${MAX_RESTARTS} restarts")
+            return false
+        }
+        self.restarts += 1
+        self.child.free()
+        self.launch()
+        return self.state == "running"
     }
 
     fun request(self, method: str, params: JsonValue, now_ms: int) {
@@ -229,15 +312,7 @@ impl PluginProc {
     // Run a contributed command. An exited plugin restarts first, up to
     // MAX_RESTARTS times.
     fun run_command(self, name: str, params: JsonValue, now_ms: int) {
-        if self.state == "exited" {
-            if self.restarts >= MAX_RESTARTS {
-                self.fail("exited after ${MAX_RESTARTS} restarts")
-                return
-            }
-            self.restarts += 1
-            self.child.free()
-            self.launch()
-        }
+        let _ = self.ensure_running()
         if self.state != "running" {
             self.queued.push(HostAction.Message(self.name(), "${self.name()} is not running", true))
             return
@@ -260,6 +335,7 @@ impl PluginProc {
             let _ = self.child.kill()
         }
         self.state = "failed"
+        self.close_outbox()
         self.pending = {}
         self.note("stopped: ${why}")
         self.queued.push(HostAction.Failed(self.name(), why))
@@ -274,7 +350,16 @@ impl PluginProc {
         for line in self.err.push(self.child.read_stderr()) {
             self.note(line)
         }
-        let lines = self.out.push(self.child.read_stdout())
+        let raw = self.child.read_stdout()
+        if raw.length() + self.out.buf.length() > MAX_INBOX {
+            self.fail("flooding")
+            for a in self.queued {
+                out.push(a)
+            }
+            self.queued = []
+            return out
+        }
+        let lines = self.out.push(raw)
         if len(lines) > MAX_PER_POLL {
             self.fail("flooding")
             for a in self.queued {
@@ -329,6 +414,7 @@ impl PluginProc {
             }
         }
         self.pending = {}
+        self.close_outbox()
         self.note("exited with code ${code}")
         if self.restarts >= MAX_RESTARTS {
             self.state = "failed"
@@ -419,6 +505,7 @@ impl PluginProc {
             }
         }
         self.state = "stopped"
+        self.close_outbox()
         self.pending = {}
     }
 }

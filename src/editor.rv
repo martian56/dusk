@@ -107,6 +107,7 @@ class Plugins {
     versions: dict[str, int] = {}
     cursor: str = ""
     cursor_sent: int = 0
+    last_tick: int = 0 - 1000000
 }
 
 let CHANGES = [
@@ -183,6 +184,39 @@ fun new_editor_with(paths: list[str], cfg: Config) -> Ed {
     }
     ed.start_plugins()
     return ed
+}
+
+fun pos_ok(d: Doc, r: int, c: int) -> bool {
+    if r < 0 or r >= len(d.lines) or c < 0 {
+        return false
+    }
+    return c <= d.line_len(r)
+}
+
+fun before(r1: int, c1: int, r2: int, c2: int) -> bool = r1 < r2 or (r1 == r2 and c1 <= c2)
+
+// Why a plugin's edits cannot apply to `d`, or "" when they can: every range
+// inside the buffer, ordered, and none overlapping another.
+fun edit_error(d: Doc, edits: list[Edit]) -> str {
+    for e in edits {
+        if not pos_ok(d, e.start_row, e.start_col) or not pos_ok(d, e.end_row, e.end_col) {
+            return "edit range out of bounds"
+        }
+        if not before(e.start_row, e.start_col, e.end_row, e.end_col) {
+            return "edit range ends before it starts"
+        }
+    }
+    let order = edits.sorted_by(
+        (a, b) => (a.start_row - b.start_row) * 1000000 + a.start_col - b.start_col,
+    )
+    for i in range(1, len(order)) {
+        let prev = order[i - 1]
+        let next = order[i]
+        if not before(prev.end_row, prev.end_col, next.start_row, next.start_col) {
+            return "edit ranges overlap"
+        }
+    }
+    return ""
 }
 
 fun cls(ch: str) -> int {
@@ -3133,6 +3167,25 @@ impl Ed {
         }
     }
 
+    fun replay_open(self, h: PluginProc) {
+        for d in self.docs {
+            if d.path != "" {
+                h.notify("buffer/opened", obj([("path", jstr(d.path))]))
+            }
+        }
+    }
+
+    // Poll plugins at most every 50 ms, from ticks and from input events
+    // alike, so a held key cannot starve them.
+    fun tick_if_due(self, now_ms: int) -> bool {
+        if now_ms - self.plug.last_tick < 50 {
+            return false
+        }
+        self.plug.last_tick = now_ms
+        self.plugin_tick(now_ms)
+        return true
+    }
+
     fun notify_plugins(self, method: str, params: JsonValue) {
         for h in self.plug.hosts {
             h.notify(method, params)
@@ -3208,18 +3261,14 @@ impl Ed {
             self.fail("${h.spec.name}: edit refused: ${why}")
             return
         }
-        for e in edits {
-            let ok_start = e.start_row >= 0 and e.start_row < len(d.lines) and e.start_col >= 0 and e.start_col <= d.line_len(
-                e.start_row,
-            )
-            let ok_end = e.end_row >= 0 and e.end_row < len(d.lines) and e.end_col >= 0 and e.end_col <= d.line_len(
-                e.end_row,
-            )
-            let ordered = e.end_row > e.start_row or (e.end_row == e.start_row and e.end_col >= e.start_col)
-            if not (ok_start and ok_end and ordered) {
-                h.respond_error(id, "edit range out of bounds")
-                return
-            }
+        let why = edit_error(d, edits)
+        if why != "" {
+            h.respond_error(id, why)
+            return
+        }
+        if len(edits) == 0 {
+            h.respond(id, obj([("version", jint(d.version))]))
+            return
         }
         let order = edits.sorted_by(
             (a, b) => (b.start_row - a.start_row) * 1000000 + b.start_col - a.start_col,
@@ -3252,7 +3301,7 @@ impl Ed {
 
     fun start_plugins(self) {
         for p in self.cfg.plugins {
-            if p.protocol and p.activation.contains("startup") {
+            if p.protocol and p.activation.contains("startup") and self.host_named(p.name).is_none() {
                 self.start_host(p)
             }
         }
@@ -3273,6 +3322,15 @@ impl Ed {
         }
     }
 
+    fun is_builtin(self, name: str) -> bool {
+        for (n, d) in COMMANDS {
+            if n == name {
+                return true
+            }
+        }
+        return name.starts_with("plugin.")
+    }
+
     fun has_protocol_plugins(self) -> bool = self.cfg.plugins.any(p => p.protocol)
 
     fun plugins_busy(self) -> bool = self.plug.hosts.any(h => h.busy_waiting())
@@ -3281,6 +3339,9 @@ impl Ed {
         let owner = self.plug.owner.get(name).unwrap_or("")
         match self.host_named(owner) {
             case Some(h) {
+                if h.ensure_running() {
+                    self.replay_open(h)
+                }
                 let d = self.doc()
                 let visual = self.mode == "visual" or self.mode == "vline"
                 let params = obj(
@@ -3300,7 +3361,7 @@ impl Ed {
         self.send_buffer_events(now_ms)
         for h in self.plug.hosts {
             for a in h.poll(now_ms) {
-                self.apply_action(a)
+                self.apply_from(Some(h), a)
             }
         }
     }
@@ -3325,6 +3386,13 @@ impl Ed {
     }
 
     fun apply_action(self, a: HostAction) {
+        let none: Option[PluginProc] = None
+        self.apply_from(none, a)
+    }
+
+    // `from` is the process the action came from; requests are answered on
+    // it, never looked up by name.
+    fun apply_from(self, from: Option[PluginProc], a: HostAction) {
         match a {
             case Message(p, text, is_error) { self.fail(text) if is_error else self.say(text) }
             case Status(p, id, text) {
@@ -3337,6 +3405,13 @@ impl Ed {
             }
             case Commands(p, cs) {
                 for c in cs {
+                    if not c.name.starts_with("${p}.") or self.is_builtin(c.name) {
+                        match self.host_named(p) {
+                            case Some(h) { h.note("ignored command ${c.name}: names must start with ${p}.") }
+                            case None {}
+                        }
+                        continue
+                    }
                     self.plug.commands.set(c.name, c)
                     self.plug.owner.set(c.name, p)
                 }
@@ -3348,19 +3423,19 @@ impl Ed {
             }
             case Failed(p, why) { self.fail("${p}: ${why}") }
             case ReadText(p, id, path) {
-                match self.host_named(p) {
+                match from {
                     case Some(h) { self.read_for_plugin(h, id, path) }
                     case None {}
                 }
             }
             case EditBuffer(p, id, path, version, edits) {
-                match self.host_named(p) {
+                match from {
                     case Some(h) { self.edit_for_plugin(h, id, path, version, edits) }
                     case None {}
                 }
             }
             case OpenBuffer(p, id, path, line) {
-                match self.host_named(p) {
+                match from {
                     case Some(h) { self.open_for_plugin(h, id, path, line) }
                     case None {}
                 }

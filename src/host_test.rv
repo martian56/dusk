@@ -2,7 +2,7 @@ from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
 from std.env import get_env
 from std.time import now_millis
 from std.sync import sleep_millis
-from "./rpc" import obj
+from "./rpc" import obj, jstr
 from "./host" import PluginSpec, PluginProc, HostAction, start_plugin, action_text
 
 fun fake_binary() -> str {
@@ -130,4 +130,24 @@ fun test_shutdown_stops_the_process() {
     p.shutdown()
     assert_eq_str(p.state, "stopped")
     assert_false(p.alive())
+}
+
+fun test_deaf_plugin_never_blocks_dusk() {
+    let p = start_plugin(fake("deaf"), ".")
+    let _ = pump(p, 5000, "bind:")
+    let big = obj([("text", jstr("y" * 1024))])
+    let t = now_millis()
+    for i in range(3000) {
+        p.notify("buffer/changed", big)
+    }
+    assert_true(now_millis() - t < 2000)
+    let got = pump(p, 5000, "failed:")
+    assert_true(has(got, "failed:not reading its input"))
+    assert_eq_str(p.state, "failed")
+}
+
+fun test_huge_line_is_stopped() {
+    let p = start_plugin(fake("bigline"), ".")
+    let got = pump(p, 10000, "failed:")
+    assert_true(has(got, "failed:flooding"))
 }

@@ -19,9 +19,9 @@ fun update(ed: Ed, e: Event) -> Step[Ed] {
         case KeyPress(k) { ed.handle_key(k) }
         case Mouse(m) { ed.handle_mouse(m) }
         case Paste(s) { ed.paste_text(s) }
-        case Tick { ed.plugin_tick(now_millis()) }
         case _ {}
     }
+    let _ = ed.tick_if_due(now_millis())
     return quit(ed) if ed.quit else next(ed)
 }
 

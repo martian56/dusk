@@ -1,11 +1,12 @@
 // A scripted protocol plugin for dusk's host tests.
 //
-//     fake-plugin echo|record|crash|flood|silent|garbage
+//     fake-plugin echo|record|crash|flood|silent|garbage|deaf|bigline
 //
 // record behaves as echo and also lists every notification it received in
 // the status item "seen".
 
 from std.env import args, exit
+from std.sync import sleep_millis
 from std.io import read_line, print
 from std.json import JsonValue, parse, stringify, json_int, json_string, json_object, json_array
 
@@ -55,6 +56,7 @@ fun contributions() -> JsonValue {
         ("fake.hello", "Say hello"),
         ("fake.edit", "Insert X"),
         ("fake.count", "Count chars"),
+        ("fake.die", "Exit"),
     ] {
         cmds.push(obj([("name", s(n)), ("title", s(t))]))
     }
@@ -147,6 +149,8 @@ fun handle(st: State, line: str) -> bool {
                 ],
             )
             ask(st, "buffer/edit", p, "edit", id)
+        } else if cmd == "fake.die" {
+            exit(4)
         } else if cmd == "fake.count" {
             ask(st, "buffer/text", obj([("path", s(str_of(params, "path")))]), "count", id)
         } else {
@@ -183,6 +187,14 @@ fun main() {
             if mode == "flood" {
                 for i in range(200000) {
                     notify("ui/message", obj([("text", s("flood ${i}"))]))
+                }
+            }
+            if mode == "deaf" or mode == "bigline" {
+                if mode == "bigline" {
+                    print("x" * 9000000)
+                }
+                while true {
+                    sleep_millis(1000)
                 }
             }
             if mode == "garbage" {

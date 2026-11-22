@@ -6,7 +6,8 @@ from std.sync import sleep_millis
 from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "./config" import Config, Plugin
-from "./editor" import Ed, new_editor_with
+from "./editor" import Ed, new_editor_with, edit_error
+from "./host" import Edit, Contribution, HostAction
 from "./keys" import parse_script
 from "./view" import render
 
@@ -219,4 +220,66 @@ fun test_plugin_command_runs_from_ex() {
     ed.ex("fake.hello")
     assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
     ed.shutdown_plugins()
+}
+
+fun edit(r1: int, c1: int, r2: int, c2: int, text: str) -> Edit {
+    return Edit(start_row: r1, start_col: c1, end_row: r2, end_col: c2, text: text)
+}
+
+fun test_overlapping_and_out_of_range_edits_are_refused() {
+    let ed = new_editor_with([], Config())
+    let _ = ed.doc().insert_at(0, 0, "a\nb\nc")
+    let d = ed.doc()
+    assert_true(edit_error(d, [edit(0, 0, 2, 0, ""), edit(1, 0, 2, 0, "")]).contains("overlap"))
+    assert_true(edit_error(d, [edit(5, 0, 5, 0, "x")]) != "")
+    assert_true(edit_error(d, [edit(0, 1, 0, 0, "x")]) != "")
+    assert_eq_str(edit_error(d, [edit(2, 0, 2, 1, "z"), edit(0, 0, 0, 1, "y")]), "")
+}
+
+fun test_plugin_cannot_take_builtin_or_foreign_names() {
+    let ed = new_editor_with([], Config())
+    let cs = [
+        Contribution(name: "save", title: ""),
+        Contribution(name: "other.x", title: ""),
+        Contribution(name: "fake.ok", title: ""),
+    ]
+    ed.apply_action(HostAction.Commands("fake", cs))
+    assert_true(ed.plug.commands.has("fake.ok"))
+    assert_false(ed.plug.commands.has("save"))
+    assert_false(ed.plug.commands.has("other.x"))
+}
+
+fun test_startup_and_language_start_once() {
+    write("_dusk_once_test.rv", "fun main() {}\n")
+    let cfg = Config(plugins: [fake_plugin("echo", ["startup", "language:raven"])])
+    let ed = new_editor_with(["_dusk_once_test.rv"], cfg)
+    assert_eq_int(len(ed.plug.hosts), 1)
+    ed.shutdown_plugins()
+    let _ = remove_file("_dusk_once_test.rv")
+}
+
+fun test_restart_replays_open_buffers() {
+    let f = with_file("_dusk_restart_test.txt", "hi\n")
+    let ed = editor("record", [f])
+    assert_true(ready(ed))
+    ed.run("fake.die", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.hosts[0].state == "exited"))
+    let _ = ed.plug.status.remove("fake/seen")
+    ed.run("fake.hello", 1)
+    assert_true(
+        wait_for(
+            ed,
+            5000,
+            e => e.plug.status.get("fake/seen").unwrap_or("").contains("buffer/opened"),
+        ),
+    )
+    ed.shutdown_plugins()
+    let _ = remove_file(f)
+}
+
+fun test_tick_if_due_is_rate_limited() {
+    let ed = new_editor_with([], Config())
+    assert_true(ed.tick_if_due(1000))
+    assert_false(ed.tick_if_due(1020))
+    assert_true(ed.tick_if_due(1060))
 }
