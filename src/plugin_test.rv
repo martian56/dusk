@@ -1,0 +1,133 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from std.env import get_env
+from std.fs import write, remove_file
+from std.time import now_millis
+from std.sync import sleep_millis
+from "github.com/martian56/plumage" import Frame
+from "github.com/martian56/plumage/buffer" import Buffer
+from "./config" import Config, Plugin
+from "./editor" import Ed, new_editor_with
+from "./keys" import parse_script
+from "./view" import render
+
+fun fake_binary() -> str {
+    let base = "tests/fake-plugin/target/raven-out/fake-plugin"
+    return base + ".exe" if get_env("OS") == "Windows_NT" else base
+}
+
+fun fake_plugin(mode: str, activation: list[str]) -> Plugin {
+    return Plugin(
+        name: "fake",
+        command: fake_binary(),
+        args: [mode],
+        input: "none",
+        output: "message",
+        key: "",
+        on: "",
+        description: "",
+        protocol: true,
+        activation: activation,
+    )
+}
+
+fun editor(mode: str, paths: list[str]) -> Ed {
+    let cfg = Config(plugins: [fake_plugin(mode, ["startup"])])
+    return new_editor_with(paths, cfg)
+}
+
+fun wait_for(ed: Ed, ms: int, pred: fun(Ed) -> bool) -> bool {
+    let end = now_millis() + ms
+    while now_millis() < end {
+        ed.plugin_tick(now_millis())
+        if pred(ed) {
+            return true
+        }
+        sleep_millis(20)
+    }
+    return false
+}
+
+fun ready(ed: Ed) -> bool = wait_for(ed, 5000, e => e.plug.commands.has("fake.hello"))
+
+fun keys(ed: Ed, script: str) {
+    for ev in parse_script(script) {
+        ed.handle_mouse(ev.mouse) if ev.is_mouse else ed.handle_key(ev.key)
+    }
+}
+
+fun status_line(ed: Ed) -> str {
+    let f = Frame(Buffer.new(120, 10))
+    render(ed, f)
+    return f.buf.row_text(8)
+}
+
+fun test_plugin_command_runs_from_palette() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    assert_true(ed.command_names().any(c => c.starts_with("fake.hello")))
+    ed.run("fake.hello", 1)
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_plugin_binding_runs_command() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    keys(ed, "gh")
+    assert_true(wait_for(ed, 5000, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_status_item_is_shown() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.hello", 1)
+    assert_true(wait_for(ed, 5000, e => e.plug.status.has("fake/fake")))
+    assert_true(status_line(ed).contains("said hello"))
+    ed.shutdown_plugins()
+}
+
+fun test_user_binding_wins() {
+    let user: dict[str, str] = {}
+    user.set("g h", "file_start")
+    let table: dict[str, dict[str, str]] = {}
+    table.set("normal", user)
+    let cfg = Config(plugins: [fake_plugin("echo", ["startup"])], keys: table)
+    let ed = new_editor_with([], cfg)
+    let _ = ed.doc().insert_at(0, 0, "a\nb\nc")
+    ed.doc().row = 2
+    assert_true(ready(ed))
+    keys(ed, "gh")
+    assert_eq_int(ed.doc().row, 0)
+    assert_false(wait_for(ed, 300, e => e.message == "hello from fake"))
+    ed.shutdown_plugins()
+}
+
+fun test_action_plugins_unchanged() {
+    let echo = Plugin(
+        name: "hi",
+        command: "cmd" if get_env("OS") == "Windows_NT" else "sh",
+        args: ["/c", "echo hi"] if get_env("OS") == "Windows_NT" else ["-c", "echo hi"],
+        input: "none",
+        output: "message",
+        key: "",
+        on: "",
+        description: "",
+    )
+    let ed = new_editor_with([], Config(plugins: [echo]))
+    ed.ex("plugin.hi")
+    assert_eq_str(ed.message, "hi: hi")
+    assert_eq_int(len(ed.plug.hosts), 0)
+}
+
+fun test_language_activation_waits_for_a_file() {
+    let cfg = Config(plugins: [fake_plugin("echo", ["language:raven"])])
+    let ed = new_editor_with([], cfg)
+    assert_eq_int(len(ed.plug.hosts), 0)
+    write("_dusk_lang_test.rv", "fun main() {}\n")
+    ed.open("_dusk_lang_test.rv")
+    assert_eq_int(len(ed.plug.hosts), 1)
+    assert_true(ready(ed))
+    ed.shutdown_plugins()
+    let _ = remove_file("_dusk_lang_test.rv")
+}

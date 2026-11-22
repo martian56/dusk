@@ -168,6 +168,9 @@ impl PluginProc {
 
     fun alive(self) -> bool = self.child.id != 0 and self.child.running()
 
+    // Waiting on an answer from the plugin.
+    fun busy_waiting(self) -> bool = self.state == "running" and len(self.pending) > 0
+
     fun note(self, line: str) {
         self.log.push(line)
         if len(self.log) > MAX_LOG {

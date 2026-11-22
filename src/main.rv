@@ -4,6 +4,8 @@
 //     dusk --keys "ihello<esc>:w<cr>" --size 100x30 --screen --dump file.rv
 
 from std.env import args, exit
+from std.time import now_millis
+from std.sync import sleep_millis
 from "github.com/martian56/plumage" import App, Event, Frame, Step, next, quit, run
 from "github.com/martian56/plumage/buffer" import Buffer
 from "./editor" import Ed, new_editor
@@ -17,12 +19,29 @@ fun update(ed: Ed, e: Event) -> Step[Ed] {
         case KeyPress(k) { ed.handle_key(k) }
         case Mouse(m) { ed.handle_mouse(m) }
         case Paste(s) { ed.paste_text(s) }
+        case Tick { ed.plugin_tick(now_millis()) }
         case _ {}
     }
     return quit(ed) if ed.quit else next(ed)
 }
 
+// Without a terminal there is no tick: give plugins time to answer before
+// each frame, so a script sees their effects deterministically.
+fun settle(ed: Ed) {
+    if len(ed.plug.hosts) == 0 {
+        return
+    }
+    let end = now_millis() + 5000
+    var quiet = 0
+    while now_millis() < end and quiet < 4 {
+        ed.plugin_tick(now_millis())
+        quiet = quiet + 1 if not ed.plugins_busy() else 0
+        sleep_millis(15)
+    }
+}
+
 fun headless(ed: Ed, script: str, w: int, h: int, screen: bool, dump: bool) {
+    settle(ed)
     var frame = Frame(Buffer.new(w, h))
     render(ed, frame)
     for ev in parse_script(script) {
@@ -31,6 +50,7 @@ fun headless(ed: Ed, script: str, w: int, h: int, screen: bool, dump: bool) {
         } else {
             ed.handle_key(ev.key)
         }
+        settle(ed)
         frame = Frame(Buffer.new(w, h))
         render(ed, frame)
         if ed.quit {
@@ -46,6 +66,7 @@ fun headless(ed: Ed, script: str, w: int, h: int, screen: bool, dump: bool) {
         print("----- ${ed.doc().path} -----")
         print(ed.doc().text(), end: "")
     }
+    ed.shutdown_plugins()
 }
 
 fun main() {
@@ -95,8 +116,11 @@ fun main() {
         headless(ed, script, w, h, screen, dump)
         return
     }
-    let app = App(init: () => ed, update: update, view: render, tick_ms: 500)
-    if not run(app) {
+    let tick = 50 if ed.has_protocol_plugins() else 500
+    let app = App(init: () => ed, update: update, view: render, tick_ms: tick)
+    let ok = run(app)
+    ed.shutdown_plugins()
+    if not ok {
         print("dusk needs a terminal; use --keys to drive it from a script")
         exit(1)
     }

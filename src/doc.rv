@@ -26,6 +26,9 @@ class Doc {
     // Highlight state at the start of each line, valid below `hl_valid`.
     hl: list[int] = []
     hl_valid: int = 0
+    // Bumped on every change, so a plugin edit made against an older text
+    // can be refused.
+    version: int = 0
 }
 
 fun clen(s: str) -> int = len(s.chars())
@@ -115,6 +118,7 @@ impl Doc {
 
     fun touched(self, from_row: int) {
         self.dirty = true
+        self.version += 1
         self.hl_valid = min(self.hl_valid, max(0, from_row))
     }
 

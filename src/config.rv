@@ -19,6 +19,11 @@ class Plugin {
     // Run automatically: "save" (after writing) or "open".
     on: str
     description: str
+    // A protocol plugin is a long-running program speaking JSON-RPC (see
+    // docs/protocol.md) instead of a one-shot command.
+    protocol: bool = false
+    // When a protocol plugin starts: "startup" or "language:<name>".
+    activation: list[str] = ["startup"]
 }
 
 class Config {
@@ -158,9 +163,16 @@ fun apply(cfg: Config, t: Toml) {
                 key: p.get_string_or("key", ""),
                 on: p.get_string_or("on", ""),
                 description: p.get_string_or("description", ""),
+                protocol: p.get_bool_or("protocol", false),
+                activation: activation_of(p),
             ),
         )
     }
+}
+
+fun activation_of(p: Toml) -> list[str] {
+    let a = p.get_strings("activation")
+    return a if len(a) > 0 else ["startup"]
 }
 
 let SAMPLE_CONFIG = """# dusk configuration. Lines starting with # are comments.
@@ -206,6 +218,14 @@ scroll_off = 3
 # output = "reload"
 # on = "save"
 # key = "ctrl+k"
+
+# A protocol plugin keeps running and talks to dusk (docs/protocol.md).
+# activation: "startup" or "language:<name>".
+# [[plugin]]
+# name = "wordcount"
+# command = "wordcount"
+# protocol = true
+# activation = ["startup"]
 
 # [[plugin]]
 # name = "sort"

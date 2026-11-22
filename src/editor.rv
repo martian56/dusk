@@ -10,6 +10,9 @@ from "./config" import Config, Plugin, load_config, config_path, config_dir, SAM
 from "./theme" import Theme, make_theme, theme_names
 from "./keys" import key_name, default_keys, normalize_binding
 from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
+from std.json import JsonValue
+from "./rpc" import obj, jstr, jint
+from "./host" import PluginSpec, PluginProc, HostAction, Contribution, Binding, Edit, start_plugin
 
 class Jump {
     path: str
@@ -19,6 +22,7 @@ class Jump {
 
 class Ed {
     docs: list[Doc]
+    plug: Plugins = Plugins()
     cur: int
     langs: list[Lang]
     cfg: Config
@@ -91,6 +95,16 @@ class Ed {
     dragging: bool = false
 }
 
+// Protocol plugin state, kept apart from Ed's own fields.
+class Plugins {
+    hosts: list[PluginProc] = []
+    // Command name -> its contribution, and the plugin that owns it.
+    commands: dict[str, Contribution] = {}
+    owner: dict[str, str] = {}
+    // "plugin/id" -> text, drawn in the status line.
+    status: dict[str, str] = {}
+}
+
 let CHANGES = [
     "delete_char",
     "delete_char_before",
@@ -113,8 +127,9 @@ let CHANGES = [
     "open_above",
 ]
 
-fun new_editor(paths: list[str]) -> Ed {
-    let cfg = load_config()
+fun new_editor(paths: list[str]) -> Ed = new_editor_with(paths, load_config())
+
+fun new_editor_with(paths: list[str], cfg: Config) -> Ed {
     let langs = builtin_langs()
     for l in cfg.langs {
         langs.push(l)
@@ -134,7 +149,7 @@ fun new_editor(paths: list[str]) -> Ed {
         }
     }
     for p in cfg.plugins {
-        if p.key != "" {
+        if p.key != "" and not p.protocol {
             keys.get("global").unwrap().set(normalize_binding(p.key), "plugin.${p.name}")
         }
     }
@@ -158,10 +173,11 @@ fun new_editor(paths: list[str]) -> Ed {
         ed.say("dusk: F1 for help, Ctrl+P to open a file, :q to quit")
     }
     for p in cfg.plugins {
-        if p.on == "open" {
+        if p.on == "open" and not p.protocol {
             ed.run_plugin(p)
         }
     }
+    ed.start_plugins()
     return ed
 }
 
@@ -228,10 +244,11 @@ impl Ed {
             self.say("new file ${p}")
         }
         for pl in self.cfg.plugins {
-            if pl.on == "open" and len(self.docs) > 1 {
+            if pl.on == "open" and len(self.docs) > 1 and not pl.protocol {
                 self.run_plugin(pl)
             }
         }
+        self.activate_for_language()
     }
 
     fun push_jump(self) {
@@ -264,7 +281,7 @@ impl Ed {
         if self.save_doc(d) {
             let msg = self.message
             for p in self.cfg.plugins {
-                if p.on == "save" {
+                if p.on == "save" and not p.protocol {
                     self.run_plugin(p)
                 }
             }
@@ -1100,7 +1117,7 @@ impl Ed {
 
     fun plugin_named(self, name: str) -> Option[Plugin] {
         for p in self.cfg.plugins {
-            if p.name == name {
+            if p.name == name and not p.protocol {
                 return Some(p)
             }
         }
@@ -1185,7 +1202,12 @@ impl Ed {
             out.push("${name}  ${desc}")
         }
         for p in self.cfg.plugins {
-            out.push("plugin.${p.name}  ${p.description if p.description != "" else p.command}")
+            if not p.protocol {
+                out.push("plugin.${p.name}  ${p.description if p.description != "" else p.command}")
+            }
+        }
+        for (name, c) in self.plug.commands {
+            out.push("${name}  ${c.title}")
         }
         return out
     }
@@ -1194,6 +1216,10 @@ impl Ed {
         let d = self.doc()
         let n = max(1, count)
         let visual = self.mode == "visual" or self.mode == "vline"
+        if self.plug.commands.has(name) {
+            self.run_plugin_command(name)
+            return
+        }
         if name.starts_with("plugin.") {
             match self.plugin_named(name.substring(7, name.length())) {
                 case Some(p) { self.run_plugin(p) }
@@ -1877,9 +1903,23 @@ impl Ed {
         } else if head == "plugins" {
             let items: list[str] = []
             for p in self.cfg.plugins {
-                items.push("plugin.${p.name}  ${p.description}")
+                if not p.protocol {
+                    items.push("plugin.${p.name}  ${p.description}")
+                }
             }
-            self.say("no plugins configured (:config to add one)") if len(items) == 0 else self.open_picker("commands", items)
+            for (name, c) in self.plug.commands {
+                items.push("${name}  ${c.title}")
+            }
+            if len(self.plug.hosts) > 0 {
+                self.say(
+                    "protocol plugins: ${", ".join(self.plug.hosts.map(h => "${h.spec.name} (${h.state})"))}",
+                )
+            }
+            if len(items) == 0 and len(self.plug.hosts) == 0 {
+                self.say("no plugins configured (:config to add one)")
+            } else if len(items) > 0 {
+                self.open_picker("commands", items)
+            }
         } else if head == "sort" {
             if not ranged {
                 r1 = 0
@@ -2686,8 +2726,13 @@ impl Ed {
             }
         }
         for p in self.cfg.plugins {
-            if "plugin.${p.name}".starts_with(text) {
+            if "plugin.${p.name}".starts_with(text) and not p.protocol {
                 out.push("plugin.${p.name}")
+            }
+        }
+        for (name, c) in self.plug.commands {
+            if name.starts_with(text) {
+                out.push(name)
             }
         }
         return out
@@ -3032,3 +3077,126 @@ let COMMANDS = [
     ("open_below", "new line below"),
     ("open_above", "new line above"),
 ]
+
+// Protocol plugins: starting them, routing their commands, and applying
+// what they send.
+impl Ed {
+    fun start_host(self, p: Plugin) {
+        let spec = PluginSpec(
+            name: p.name,
+            command: p.command,
+            args: p.args,
+            activation: p.activation,
+        )
+        self.plug.hosts.push(start_plugin(spec, "."))
+    }
+
+    fun host_named(self, name: str) -> Option[PluginProc] {
+        for h in self.plug.hosts {
+            if h.spec.name == name {
+                return Some(h)
+            }
+        }
+        return None
+    }
+
+    fun start_plugins(self) {
+        for p in self.cfg.plugins {
+            if p.protocol and p.activation.contains("startup") {
+                self.start_host(p)
+            }
+        }
+        self.activate_for_language()
+    }
+
+    // Start plugins waiting for the current buffer's language.
+    fun activate_for_language(self) {
+        let d = self.doc()
+        if d.lang < 0 {
+            return
+        }
+        let want = "language:${self.langs[d.lang].name}"
+        for p in self.cfg.plugins {
+            if p.protocol and p.activation.contains(want) and self.host_named(p.name).is_none() {
+                self.start_host(p)
+            }
+        }
+    }
+
+    fun has_protocol_plugins(self) -> bool = self.cfg.plugins.any(p => p.protocol)
+
+    fun plugins_busy(self) -> bool = self.plug.hosts.any(h => h.busy_waiting())
+
+    fun run_plugin_command(self, name: str) {
+        let owner = self.plug.owner.get(name).unwrap_or("")
+        match self.host_named(owner) {
+            case Some(h) {
+                let d = self.doc()
+                let visual = self.mode == "visual" or self.mode == "vline"
+                let params = obj(
+                    [
+                        ("path", jstr(d.path)),
+                        ("version", jint(d.version)),
+                        ("selection", jstr(self.selection_text() if visual else "")),
+                    ],
+                )
+                h.run_command(name, params, now_millis())
+            }
+            case None { self.fail("no plugin for ${name}") }
+        }
+    }
+
+    fun plugin_tick(self, now_ms: int) {
+        for h in self.plug.hosts {
+            for a in h.poll(now_ms) {
+                self.apply_action(a)
+            }
+        }
+    }
+
+    fun shutdown_plugins(self) {
+        for h in self.plug.hosts {
+            h.shutdown()
+        }
+    }
+
+    fun bind_plugin_key(self, b: Binding) {
+        if not self.keys.has(b.mode) {
+            let fresh: dict[str, str] = {}
+            self.keys.set(b.mode, fresh)
+        }
+        let table = self.keys.get(b.mode).unwrap()
+        let seq = normalize_binding(b.keys)
+        // dusk's own bindings and the user's config win.
+        if not table.has(seq) {
+            table.set(seq, b.command)
+        }
+    }
+
+    fun apply_action(self, a: HostAction) {
+        match a {
+            case Message(p, text, is_error) { self.fail(text) if is_error else self.say(text) }
+            case Status(p, id, text) {
+                let key = "${p}/${id}"
+                if text == "" {
+                    let _ = self.plug.status.remove(key)
+                } else {
+                    self.plug.status.set(key, text)
+                }
+            }
+            case Commands(p, cs) {
+                for c in cs {
+                    self.plug.commands.set(c.name, c)
+                    self.plug.owner.set(c.name, p)
+                }
+            }
+            case Bind(p, bs) {
+                for b in bs {
+                    self.bind_plugin_key(b)
+                }
+            }
+            case Failed(p, why) { self.fail("${p}: ${why}") }
+            case _ {}
+        }
+    }
+}

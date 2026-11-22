@@ -390,7 +390,11 @@ fun draw_status(ed: Ed, buf: Buffer, y: int) {
     }
     let lname = ed.langs[d.lang].name if d.lang >= 0 else "text"
     let pct = 100 * (d.row + 1) / len(d.lines)
-    let right = "${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
+    var items = ""
+    for k in ed.plug.status.keys().sorted() {
+        items += "${ed.plug.status.get(k).unwrap()}  "
+    }
+    let right = "${items}${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
     let _ = put(buf, max(x + 1, buf.w - right.length()), y, right, bar)
 }
 
