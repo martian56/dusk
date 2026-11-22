@@ -1,0 +1,135 @@
+// JSON-RPC 2.0 over newline-delimited JSON: the plugin wire format.
+
+from std.json import JsonValue, parse, stringify, json_int, json_string, json_object
+
+class LineReader {
+    buf: str
+}
+
+impl LineReader {
+    // Complete lines from `chunk` plus what was buffered; keeps the tail.
+    fun push(self, chunk: str) -> list[str] {
+        let out: list[str] = []
+        if chunk == "" {
+            return out
+        }
+        let s = self.buf + chunk
+        var start = 0
+        var i = s.index_of("\n")
+        while i >= 0 {
+            var line = s.substring(start, i)
+            if line.ends_with("\r") {
+                line = line.substring(0, line.length() - 1)
+            }
+            if line.trim() != "" {
+                out.push(line)
+            }
+            start = i + 1
+            let rest = s.substring(start, s.length()).index_of("\n")
+            i = start + rest if rest >= 0 else 0 - 1
+        }
+        self.buf = s.substring(start, s.length())
+        return out
+    }
+}
+
+class RpcMsg {
+    // "request", "notification", "response", or "invalid".
+    kind: str
+    id: int
+    method: str
+    params: JsonValue
+    result: JsonValue
+    error: str
+}
+
+fun invalid(why: str) -> RpcMsg = RpcMsg("invalid", 0 - 1, "", JsonValue.Null, JsonValue.Null, why)
+
+fun parse_msg(line: str) -> RpcMsg {
+    let v = match parse(line) {
+        case Ok(x) { x }
+        case Err(e) {
+            return invalid(e.message())
+        }
+    }
+    match v {
+        case Object(m) {}
+        case _ {
+            return invalid("not an object")
+        }
+    }
+    let id = match v.get("id") {
+        case Some(x) { x.as_int().unwrap_or(0 - 1) }
+        case None { 0 - 1 }
+    }
+    let method = get_str(v, "method")
+    let params = v.get("params").unwrap_or(JsonValue.Null)
+    if method != "" {
+        return RpcMsg("request" if id >= 0 else "notification", id, method, params, JsonValue.Null, "")
+    }
+    if id < 0 {
+        return invalid("no method and no id")
+    }
+    match v.get("error") {
+        case Some(e) {
+            let msg = get_str(e, "message")
+            return RpcMsg(
+                "response",
+                id,
+                "",
+                JsonValue.Null,
+                JsonValue.Null,
+                msg if msg != "" else "error",
+            )
+        }
+        case None {}
+    }
+    return RpcMsg("response", id, "", JsonValue.Null, v.get("result").unwrap_or(JsonValue.Null), "")
+}
+
+fun line_of(pairs: list[(str, JsonValue)]) -> str = stringify(obj(pairs)) + "\n"
+
+fun encode_request(id: int, method: str, params: JsonValue) -> str {
+    return line_of(
+        [("jsonrpc", jstr("2.0")), ("id", jint(id)), ("method", jstr(method)), ("params", params)],
+    )
+}
+
+fun encode_notification(method: str, params: JsonValue) -> str {
+    return line_of([("jsonrpc", jstr("2.0")), ("method", jstr(method)), ("params", params)])
+}
+
+fun encode_result(id: int, result: JsonValue) -> str {
+    return line_of([("jsonrpc", jstr("2.0")), ("id", jint(id)), ("result", result)])
+}
+
+fun encode_error(id: int, code: int, message: str) -> str {
+    let err = obj([("code", jint(code)), ("message", jstr(message))])
+    return line_of([("jsonrpc", jstr("2.0")), ("id", jint(id)), ("error", err)])
+}
+
+fun obj(pairs: list[(str, JsonValue)]) -> JsonValue {
+    let m: dict[str, JsonValue] = {}
+    for (k, v) in pairs {
+        m.set(k, v)
+    }
+    return json_object(m)
+}
+
+fun jstr(s: str) -> JsonValue = json_string(s)
+
+fun jint(n: int) -> JsonValue = json_int(n)
+
+fun get_str(v: JsonValue, key: str) -> str {
+    return match v.get(key) {
+        case Some(x) { x.as_string().unwrap_or("") }
+        case None { "" }
+    }
+}
+
+fun get_int(v: JsonValue, key: str, default: int) -> int {
+    return match v.get(key) {
+        case Some(x) { x.as_int().unwrap_or(default) }
+        case None { default }
+    }
+}
