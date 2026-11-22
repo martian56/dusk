@@ -12,6 +12,7 @@ from "./keys" import key_name, default_keys, normalize_binding
 from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
 from std.json import JsonValue
 from "./rpc" import obj, jstr, jint
+from "./ui" import PanelState, new_panel, replace_panel, panel_key, keep_in_view, layout, paste_into
 from "./host" import PluginSpec, PluginProc, HostAction, Contribution, Binding, Edit, start_plugin
 
 class Jump {
@@ -108,6 +109,13 @@ class Plugins {
     cursor: str = ""
     cursor_sent: int = 0
     last_tick: int = 0 - 1000000
+    panels: list[PanelState] = []
+    // The focused panel, -1 for the editor.
+    focus: int = 0 - 1
+    mode_before: str = "normal"
+    // Screen rectangle (x, y, w, h) of each panel from the last frame.
+    rects: list[(int, int, int, int)] = []
+    frame: int = 0
 }
 
 let CHANGES = [
@@ -1265,6 +1273,18 @@ impl Ed {
             self.run_plugin_command(name)
             return
         }
+        if name == "focus_next" or name == "focus_prev" {
+            if len(self.plug.panels) == 0 {
+                self.fail("no plugin panels")
+            } else {
+                self.cycle_focus(1 if name == "focus_next" else 0 - 1)
+            }
+            return
+        }
+        if name == "close_panel" {
+            self.close_focused_panel()
+            return
+        }
         if name.starts_with("plugin.") {
             match self.plugin_named(name.substring(7, name.length())) {
                 case Some(p) { self.run_plugin(p) }
@@ -2048,6 +2068,14 @@ impl Ed {
 
     fun handle_key(self, k: Key) {
         let name = key_name(k)
+        if (name == "f6" or name == "shift+f6") and len(self.plug.panels) > 0 {
+            self.cycle_focus(1 if name == "f6" else 0 - 1)
+            return
+        }
+        if self.mode == "panel" {
+            self.panel_input(k, name)
+            return
+        }
         if not self.replaying and self.mode != "help" {
             self.message = "" if self.mode == "normal" and self.pending == "" and self.op == "" else self.message
         }
@@ -2865,6 +2893,10 @@ impl Ed {
     }
 
     fun paste_text(self, text: str) {
+        if self.mode == "panel" and self.plug.focus >= 0 {
+            paste_into(self.plug.panels[self.plug.focus], text)
+            return
+        }
         let d = self.doc()
         if self.mode == "prompt" or self.mode == "picker" {
             self.prompt += text.split("\n")[0]
@@ -2905,6 +2937,9 @@ impl Ed {
         }
         let x = m.x - 1
         let y = m.y - 1
+        if self.panel_mouse(m, x, y) {
+            return
+        }
         let d = self.doc()
         let in_side = self.show_tree and x < self.side_w
         let in_text = x >= self.text_x and y >= self.text_y and y < self.text_y + self.text_h
@@ -3069,6 +3104,9 @@ impl Ed {
 
 // Every built-in command with a short description, for the palette and help.
 let COMMANDS = [
+    ("focus_next", "focus the next plugin panel (F6)"),
+    ("focus_prev", "focus the previous plugin panel (Shift+F6)"),
+    ("close_panel", "close the focused plugin panel"),
     ("save", "write the file"),
     ("save_all", "write every changed file"),
     ("quit", "quit (asks about unsaved files)"),
@@ -3444,5 +3482,177 @@ impl Ed {
         }
     }
 
-    fun apply_ui(self, from: Option[PluginProc], a: HostAction) {}
+    fun apply_ui(self, from: Option[PluginProc], a: HostAction) {
+        match a {
+            case Panel(p, spec) {
+                for i in range(len(self.plug.panels)) {
+                    let old = self.plug.panels[i]
+                    if old.owner == p and old.spec.id == spec.id {
+                        self.plug.panels[i] = replace_panel(old, spec)
+                        return
+                    }
+                }
+                self.plug.panels.push(new_panel(p, spec))
+            }
+            case ClosePanel(p, id) {
+                for i in range(len(self.plug.panels)) {
+                    if self.plug.panels[i].owner == p and self.plug.panels[i].spec.id == id {
+                        self.remove_panel(i)
+                        return
+                    }
+                }
+            }
+            case _ {}
+        }
+    }
+
+    fun remove_panel(self, i: int) {
+        let _ = self.plug.panels.remove_at(i)
+        if self.plug.focus == i {
+            self.plug.focus = 0 - 1
+            self.mode = self.plug.mode_before
+        } else if self.plug.focus > i {
+            self.plug.focus -= 1
+        }
+    }
+
+    fun panel_host(self, p: PanelState) -> Option[PluginProc] = self.host_named(p.owner)
+
+    fun send_panel_event(self, p: PanelState, block: str, kind: str, value: JsonValue) {
+        match self.panel_host(p) {
+            case Some(h) { h.send_event(p.spec.id, block, kind, value) }
+            case None {}
+        }
+    }
+
+    // Close a panel from dusk's side and tell its plugin.
+    fun close_panel_at(self, i: int) {
+        let p = self.plug.panels[i]
+        self.remove_panel(i)
+        self.send_panel_event(p, "", "closed", JsonValue.Null)
+    }
+
+    fun close_focused_panel(self) {
+        let n = len(self.plug.panels)
+        if n == 0 {
+            self.fail("no plugin panels")
+            return
+        }
+        self.close_panel_at(self.plug.focus if self.plug.focus >= 0 else n - 1)
+    }
+
+    fun focus_panel(self, i: int) {
+        if i < 0 {
+            if self.plug.focus >= 0 {
+                self.mode = self.plug.mode_before
+            }
+            self.plug.focus = 0 - 1
+            return
+        }
+        if self.plug.focus < 0 {
+            self.plug.mode_before = self.mode if self.mode != "panel" else "normal"
+        }
+        self.plug.focus = i
+        self.mode = "panel"
+    }
+
+    // F6 order: editor, each panel, editor again.
+    fun cycle_focus(self, dir: int) {
+        let n = len(self.plug.panels)
+        let at = self.plug.focus + 1
+        let next = (at + dir + n + 1) % (n + 1)
+        self.focus_panel(next - 1)
+    }
+
+    fun panel_size(self, i: int) -> (int, int) {
+        if i < len(self.plug.rects) {
+            let (x, y, w, h) = self.plug.rects[i]
+            return (max(1, w - 2), max(1, h - 1))
+        }
+        return (40, 10)
+    }
+
+    fun panel_input(self, k: Key, name: str) {
+        let i = self.plug.focus
+        if i < 0 or i >= len(self.plug.panels) {
+            self.focus_panel(0 - 1)
+            return
+        }
+        if name == "esc" {
+            self.focus_panel(0 - 1)
+            return
+        }
+        let p = self.plug.panels[i]
+        let typed = match k {
+            case Char(c) { c }
+            case _ { "" }
+        }
+        let ev = panel_key(p, name, typed)
+        let (w, h) = self.panel_size(i)
+        keep_in_view(p, w, h)
+        if ev.kind != "" {
+            self.send_panel_event(p, ev.block, ev.kind, ev.value)
+        }
+    }
+
+    fun panel_at(self, x: int, y: int) -> int {
+        for i in range(len(self.plug.rects)) {
+            let (rx, ry, rw, rh) = self.plug.rects[i]
+            if x >= rx and x < rx + rw and y >= ry and y < ry + rh {
+                return i
+            }
+        }
+        return 0 - 1
+    }
+
+    // Clicks and the wheel over a panel. True when the panel took the event.
+    fun panel_mouse(self, m: MouseEvent, x: int, y: int) -> bool {
+        let i = self.panel_at(x, y)
+        if i < 0 or i >= len(self.plug.panels) {
+            match m.kind {
+                case Down {
+                    if self.mode == "panel" {
+                        self.focus_panel(0 - 1)
+                    }
+                }
+                case _ {}
+            }
+            return false
+        }
+        let p = self.plug.panels[i]
+        let (rx, ry, rw, rh) = self.plug.rects[i]
+        match m.kind {
+            case ScrollDown {
+                p.scroll += 3
+            }
+            case ScrollUp {
+                p.scroll = max(0, p.scroll - 3)
+            }
+            case Down {
+                if y == ry and x >= rx + rw - 3 {
+                    self.close_panel_at(i)
+                    return true
+                }
+                self.focus_panel(i)
+                let rows = layout(p, max(1, rw - 2), max(1, rh - 1), self.plug.frame)
+                let r = y - ry - 1
+                if r >= 0 and r < len(rows) {
+                    let row = rows[r]
+                    let b = p.spec.blocks[row.block]
+                    if b.kind == "list" or b.kind == "input" or b.kind == "buttons" {
+                        p.focus_block = row.block
+                    }
+                    if row.item >= 0 {
+                        let again = p.sel.get(b.id).unwrap_or(0 - 1) == row.item
+                        p.sel.set(b.id, row.item)
+                        if again {
+                            self.send_panel_event(p, b.id, "choose", jint(row.item))
+                        }
+                    }
+                }
+            }
+            case _ {}
+        }
+        return true
+    }
 }

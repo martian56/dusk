@@ -283,3 +283,100 @@ fun test_tick_if_due_is_rate_limited() {
     assert_false(ed.tick_if_due(1020))
     assert_true(ed.tick_if_due(1060))
 }
+
+fun screen(ed: Ed, w: int, h: int) -> list[str] {
+    let f = Frame(Buffer.new(w, h))
+    render(ed, f)
+    let out: list[str] = []
+    for y in range(h) {
+        out.push(f.buf.row_text(y))
+    }
+    return out
+}
+
+fun with_panel() -> Ed {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.run("fake.panel", 1)
+    assert_true(wait_for(ed, 5000, e => len(e.plug.panels) == 1))
+    let _ = screen(ed, 120, 30)
+    return ed
+}
+
+fun last_event(ed: Ed, want: str) -> bool = wait_for(ed, 5000, e => e.message.starts_with(want))
+
+fun test_panel_opens_docked_right() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    let _ = screen(ed, 120, 30)
+    let wide = ed.text_w
+    ed.run("fake.panel", 1)
+    assert_true(wait_for(ed, 5000, e => len(e.plug.panels) == 1))
+    let rows = screen(ed, 120, 30)
+    assert_true(ed.text_w <= wide - 48)
+    assert_true(rows[1].chars().slice(72, 120).join("").contains("Fake"))
+    assert_true("|".join(rows).contains("two.rv  2 hits"))
+    ed.shutdown_plugins()
+}
+
+fun test_f6_cycles_focus_and_esc_returns() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "panel")
+    assert_eq_int(ed.plug.focus, 0)
+    keys(ed, "<f6>")
+    assert_eq_str(ed.mode, "normal")
+    assert_eq_int(ed.plug.focus, 0 - 1)
+    keys(ed, "<s-f6><esc>")
+    assert_eq_str(ed.mode, "normal")
+    assert_eq_int(ed.plug.focus, 0 - 1)
+    ed.shutdown_plugins()
+}
+
+fun test_choose_in_list_sends_event() {
+    let ed = with_panel()
+    keys(ed, "<f6><down><cr>")
+    assert_true(last_event(ed, "event p1 files choose 1"))
+    ed.shutdown_plugins()
+}
+
+fun test_input_submit_sends_text() {
+    let ed = with_panel()
+    keys(ed, "<f6><tab>hi<cr>")
+    assert_true(last_event(ed, "event p1 ask submit \"hi\""))
+    ed.shutdown_plugins()
+}
+
+fun test_click_focuses_panel() {
+    let ed = with_panel()
+    keys(ed, "<click:100,6>")
+    assert_eq_str(ed.mode, "panel")
+    keys(ed, "<click:10,6>")
+    assert_eq_str(ed.mode, "normal")
+    ed.shutdown_plugins()
+}
+
+fun test_close_button_sends_closed_event() {
+    let ed = with_panel()
+    keys(ed, "<click:119,2>")
+    assert_eq_int(len(ed.plug.panels), 0)
+    assert_true(last_event(ed, "event p1  closed"))
+    ed.shutdown_plugins()
+}
+
+fun test_replace_keeps_focus() {
+    let ed = with_panel()
+    keys(ed, "<f6><down>")
+    ed.run("fake.panel", 1)
+    let _ = wait_for(ed, 500, e => false)
+    assert_eq_str(ed.mode, "panel")
+    assert_eq_int(ed.plug.panels[0].sel.get("files").unwrap_or(0), 1)
+    ed.shutdown_plugins()
+}
+
+fun test_status_shows_panel_mode() {
+    let ed = with_panel()
+    keys(ed, "<f6>")
+    assert_true(screen(ed, 120, 30)[28].contains("PANEL"))
+    ed.shutdown_plugins()
+}

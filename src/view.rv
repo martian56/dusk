@@ -5,6 +5,7 @@ from "github.com/martian56/plumage" import Frame
 from "github.com/martian56/plumage/buffer" import Buffer
 from "github.com/martian56/plumage/style" import Style
 from "github.com/martian56/wingspan" import width, truncate
+from "./ui" import layout
 from "./editor" import Ed, COMMANDS
 from "./doc" import Doc
 from "./langs" import KIND_NAMES
@@ -63,6 +64,9 @@ fun mode_label(ed: Ed) -> (str, str) {
     if m == "tree" {
         return ("FILES", "ui.mode.command")
     }
+    if m == "panel" {
+        return ("PANEL", "ui.mode.command")
+    }
     return ("NORMAL", "ui.mode.normal")
 }
 
@@ -77,7 +81,14 @@ fun render(ed: Ed, f: Frame) {
         fill_row(buf, 0, buf.w, y, bg)
     }
     let panel_h = min(12, buf.h / 3) if ed.show_panel and len(ed.panel) > 0 else 0
-    let body_h = max(1, buf.h - 3 - panel_h)
+    let docked = ed.plug.panels
+    let has_right = docked.any(p => p.spec.dock == "right") and buf.w >= 60
+    let has_bottom = docked.any(
+        p => p.spec.dock == "bottom" or (p.spec.dock == "right" and buf.w < 60),
+    )
+    let right_w = min(60, buf.w * 2 / 5) if has_right else 0
+    let bottom_h = min(14, buf.h / 3) if has_bottom else 0
+    let body_h = max(1, buf.h - 3 - panel_h - bottom_h)
     let side_w = min(34, max(22, buf.w / 5)) if ed.show_tree and buf.w >= 60 else 0
     let d = ed.doc()
     let digits = "${len(d.lines)}".length()
@@ -87,7 +98,7 @@ fun render(ed: Ed, f: Frame) {
     ed.text_y = 1
     ed.text_h = body_h
     ed.gutter_w = gutter
-    ed.text_w = max(1, buf.w - side_w - gutter)
+    ed.text_w = max(1, buf.w - side_w - gutter - right_w)
     ed.scroll_into_view()
 
     draw_tabs(ed, buf, bar)
@@ -98,6 +109,7 @@ fun render(ed: Ed, f: Frame) {
     if panel_h > 0 {
         draw_panel(ed, buf, 1 + body_h, panel_h)
     }
+    draw_docked(ed, buf, right_w, body_h, 1 + body_h + panel_h, bottom_h)
     draw_status(ed, buf, buf.h - 2)
     draw_message(ed, buf, buf.h - 1)
     if ed.mode == "picker" {
@@ -369,6 +381,95 @@ fun cell_col(line: str, col: int, tw: int) -> int {
         }
     }
     return cell
+}
+
+// Plugin panels: right-docked ones stacked beside the text, bottom ones side
+// by side under it. Records each panel's rectangle for the mouse.
+fun draw_docked(ed: Ed, buf: Buffer, right_w: int, body_h: int, bottom_y: int, bottom_h: int) {
+    ed.plug.frame += 1
+    let n = len(ed.plug.panels)
+    let rects: list[(int, int, int, int)] = []
+    let right: list[int] = []
+    let bottom: list[int] = []
+    for i in range(n) {
+        rects.push((0, 0, 0, 0))
+        right.push(i) if ed.plug.panels[i].spec.dock == "right" and right_w > 0 else bottom.push(i)
+    }
+    var y = 1
+    for k in range(len(right)) {
+        let h = body_h / len(right) + (body_h % len(right) if k == len(right) - 1 else 0)
+        rects[right[k]] = (buf.w - right_w, y, right_w, h)
+        y += h
+    }
+    var x = 0
+    for k in range(len(bottom)) {
+        let w = buf.w / len(bottom) + (buf.w % len(bottom) if k == len(bottom) - 1 else 0)
+        rects[bottom[k]] = (x, bottom_y, w, bottom_h)
+        x += w
+    }
+    ed.plug.rects = rects
+    for i in range(n) {
+        let (rx, ry, rw, rh) = rects[i]
+        if rw > 2 and rh > 1 {
+            draw_plugin_panel(ed, buf, i, rx, ry, rw, rh)
+        }
+    }
+}
+
+fun draw_plugin_panel(ed: Ed, buf: Buffer, i: int, x: int, y: int, w: int, h: int) {
+    let t = ed.theme
+    let p = ed.plug.panels[i]
+    let focused = ed.plug.focus == i
+    let bg = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.bg"))
+    for yy in range(y, y + h) {
+        fill_row(buf, x, x + w, yy, bg)
+    }
+    let title_bg = t.c("ui.mode.normal") if focused else t.c("ui.bar")
+    let title = Style.new().fg(t.c("ui.bg") if focused else t.c("ui.bar.fg")).bg(title_bg).bold()
+    fill_row(buf, x, x + w, y, title)
+    let _ = put(buf, x, y, truncate(" ${p.spec.title}", w - 3), title)
+    let _ = put(buf, x + w - 2, y, "×", title)
+    let border = Style.new().fg(t.c("ui.mode.normal") if focused else t.c("ui.border")).bg(
+        t.c("ui.bg"),
+    )
+    for yy in range(y + 1, y + h) {
+        buf.set(x, yy, "│", border)
+    }
+    let cw = w - 2
+    let rows = layout(p, cw, h - 1, ed.plug.frame)
+    for r in range(len(rows)) {
+        let row = rows[r]
+        let ry = y + 1 + r
+        let cx = x + 2
+        if row.kind == "text" and len(row.spans) > 0 {
+            var at = cx
+            for sp in row.spans {
+                at = put(buf, at, ry, sp.text, sp.style.bg(t.c("ui.bg")))
+                if at >= x + w {
+                    break
+                }
+            }
+            continue
+        }
+        var st = bg
+        if row.kind == "item_sel" {
+            st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.tab.active") if focused else t.c("ui.bar")).bold()
+            fill_row(buf, cx, x + w, ry, st)
+        } else if row.kind == "button" {
+            st = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.bg")).bold()
+        } else if row.kind == "progress" {
+            st = Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bg"))
+        } else if row.kind == "input" {
+            st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.bar"))
+            fill_row(buf, cx, x + w, ry, st)
+        }
+        let _ = put(buf, cx, ry, row.text, st)
+        if focused and row.cursor >= 0 and cx + row.cursor < x + w {
+            let cs = row.text.chars()
+            let under = cs[row.cursor] if row.cursor < len(cs) else " "
+            buf.set(cx + row.cursor, ry, under, Style.new().fg(t.c("ui.bg")).bg(t.c("ui.cursor")))
+        }
+    }
 }
 
 fun draw_status(ed: Ed, buf: Buffer, y: int) {
