@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-11-24
+
+- Changes made outside dusk are highlighted: after a reload, added and changed lines get a gutter bar and a tinted background, and removed lines a mark. `] c` and `[ c` jump between changes, and `:clear_changes` drops them. Plugins set what to compare against with `changes/baseline`, so rook shows exactly what it edited. Themes color them with `ui.diff.add`, `ui.diff.change`, and `ui.diff.delete`.
+- Shift with the wheel, or a sideways wheel, scrolls long lines.
+- A panel docked on the right no longer hides the end of a long line.
+- Help lines wrap; long paths shrink from the front so the cursor position stays on the status bar; the tab bar keeps the active tab in view and marks hidden tabs with `‹` and `›`.
+- Undo back to the saved text leaves the buffer clean, `dd` on an empty buffer changes nothing, and a click after wide characters lands where it should.
+- Jumping to the end of a long file is much faster (a 60,000-line file: 550 ms to 35 ms).
+- Built on plumage 0.5.3, perch 0.4.1, and magpie 0.5.1.
+
 ## 0.5.0 - 2026-11-24
 
 - Theme files: every `~/.config/dusk/themes/*.toml` adds a theme with a name, a description, an optional built-in base, and optional `[colors]`, `[styles]` (bold, italic, underline, dim per syntax kind), `[glyphs]` (brand, tab and tree markers, borders, corners, indent guide), and `[labels]` (mode names) tables.
