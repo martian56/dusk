@@ -10,7 +10,7 @@ from "./ui" import layout
 from "./editor" import Ed, COMMANDS
 from "./doc" import Doc, cell_col
 from "./langs" import KIND_NAMES
-from "./highlight" import highlight_line, kinds_for
+from "./highlight" import highlight_line, kinds_for, quick_end_state
 
 fun put(buf: Buffer, x: int, y: int, s: str, st: Style) -> int {
     if y < 0 or y >= buf.h or x >= buf.w {
@@ -42,8 +42,11 @@ fun ensure_hl(ed: Ed, d: Doc, upto: int) {
     let target = min(upto, n - 1)
     while d.hl_valid < target {
         let r = d.hl_valid
-        let sp = highlight_line(l, d.lines[r].chars(), d.hl[r])
-        d.hl.push(sp.end_state)
+        var next = quick_end_state(l, d.lines[r], d.hl[r])
+        if next < 0 {
+            next = highlight_line(l, d.lines[r].chars(), d.hl[r]).end_state
+        }
+        d.hl.push(next)
         d.hl_valid += 1
     }
 }

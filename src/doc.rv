@@ -159,7 +159,17 @@ impl Doc {
         self.col = s.col
         self.clamp()
         self.touched(0)
+        self.dirty = not self.matches_disk()
         return true
+    }
+
+    // Whether the buffer holds exactly the text dusk last read or wrote, so
+    // undoing back to it leaves the buffer clean.
+    fun matches_disk(self) -> bool {
+        if self.path == "" {
+            return len(self.lines) == 1 and self.lines[0] == ""
+        }
+        return text_lines(self.disk) == self.lines
     }
 
     fun do_redo(self) -> bool {
@@ -173,6 +183,7 @@ impl Doc {
         self.col = s.col
         self.clamp()
         self.touched(0)
+        self.dirty = not self.matches_disk()
         return true
     }
 
@@ -231,6 +242,10 @@ impl Doc {
         var out = ""
         for r in range(r1, r2 + 1) {
             out += self.lines[r] + "\n"
+        }
+        // Deleting the only line of an empty buffer changes nothing.
+        if len(self.lines) == 1 and self.lines[0] == "" {
+            return out
         }
         var k = r2
         while k >= r1 {

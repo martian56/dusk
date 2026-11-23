@@ -1,6 +1,6 @@
-from std.test import assert_eq_str, assert_eq_int
-from "./langs" import builtin_langs, lang_for_path, KIND_NAMES
-from "./highlight" import highlight_line
+from std.test import assert_eq_str, assert_eq_int, assert_true
+from "./langs" import builtin_langs, lang_for_path, lang_named, KIND_NAMES
+from "./highlight" import highlight_line, quick_end_state
 
 fun tokens(path: str, line: str, state: int) -> str {
     let langs = builtin_langs()
@@ -58,4 +58,27 @@ fun test_json_keys() {
         tokens("a.json", "{\"n\": 3, \"ok\": true}", 0),
         "key:\"n\" operator:: number:3 key:\"ok\" operator:: constant:true",
     )
+}
+
+fun test_quick_end_state_agrees_with_a_full_pass() {
+    let langs = builtin_langs()
+    let l = langs[lang_named(langs, "raven")]
+    let lines = [
+        "let x = 1",
+        "/* open",
+        "still inside",
+        "close */ let y = 2",
+        "s = \"\"\"multi",
+        "inside",
+        "end\"\"\" ok",
+        "// a line comment",
+        "x = \"/* not a comment */\"",
+    ]
+    var st = 0
+    for line in lines {
+        let full = highlight_line(l, line.chars(), st).end_state
+        let quick = quick_end_state(l, line, st)
+        assert_true(quick < 0 or quick == full)
+        st = full
+    }
 }
