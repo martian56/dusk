@@ -251,6 +251,17 @@ No params. Result: `{"themes": [{"name", "description"}], "current"}`.
 Plugins can also ship theme files with no code at all: see `themes` in
 `dusk-plugin.toml`.
 
+## Changes
+
+### changes/baseline (notification from a plugin)
+
+Params: `{"path", "text"}`. dusk highlights how `path` differs from `text`:
+added and changed lines get a bar in the gutter and a tinted background, and
+a mark shows where lines were removed. `] c` and `[ c` jump between changes,
+and `clear_changes` drops them. The file need not be open yet. Leave out
+`text` to clear the highlights. dusk sets the same baseline by itself when a
+file it has open changes on disk.
+
 ### marks/set (notification from a plugin)
 
 Replaces the plugin's marks on a file, which need not be open yet.

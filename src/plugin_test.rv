@@ -885,3 +885,40 @@ fun test_plugin_defines_sets_and_lists_themes() {
     assert_eq_str(ed.theme.name, "fake-neon")
     ed.shutdown_plugins()
 }
+
+fun test_plugin_baseline_highlights_changes() {
+    let path = "target/baseline-test.txt"
+    let _ = write(path, "one\nnew\nthree\nfour\n")
+    let ed = editor("echo", [path])
+    assert_true(ready(ed))
+    ed.ex("fake.baseline")
+    assert_true(wait_for(ed, 5000, e => len(e.change_kinds(e.doc())) > 0))
+    let ks = ed.change_kinds(ed.doc())
+    assert_eq_int(ks[0], 0)
+    assert_eq_int(ks[1], 2)
+    assert_eq_int(ks[3], 1)
+    ed.run("next_change", 1)
+    assert_eq_int(ed.doc().row, 1)
+    ed.run("next_change", 1)
+    assert_eq_int(ed.doc().row, 3)
+    ed.ex("fake.unbase")
+    assert_true(wait_for(ed, 5000, e => len(e.change_kinds(e.doc())) == 0))
+    ed.shutdown_plugins()
+    let _ = remove_file(path)
+}
+
+fun test_reload_highlights_what_changed_on_disk() {
+    let path = "target/reload-diff-test.txt"
+    let _ = write(path, "keep\nold line\n")
+    let ed = editor("echo", [path])
+    assert_true(ready(ed))
+    ed.ex("fake.touch")
+    assert_true(wait_for(ed, 5000, e => e.doc().lines[0] == "changed on disk"))
+    let ks = ed.change_kinds(ed.doc())
+    assert_true(ks.any(k => k != 0))
+    assert_true(ed.message.contains("changed"))
+    ed.run("clear_changes", 1)
+    assert_eq_int(len(ed.change_kinds(ed.doc())), 0)
+    ed.shutdown_plugins()
+    let _ = remove_file(path)
+}

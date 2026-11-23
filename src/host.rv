@@ -81,6 +81,7 @@ enum HostAction {
     SetTheme(str, str),
     DefineTheme(str, ExtraTheme),
     ListThemes(str, int),
+    Baseline(str, str, Option[str]),
 }
 
 let BLOCK_KINDS = ["text", "list", "input", "buttons", "progress"]
@@ -197,6 +198,7 @@ fun action_text(a: HostAction) -> str {
         case SetTheme(p, name) { "theme:${name}" }
         case DefineTheme(p, spec) { "define-theme:${spec.name}:${len(spec.colors)}" }
         case ListThemes(p, id) { "list-themes" }
+        case Baseline(p, path, text) { "baseline:${path}:${"clear" if text.is_none() else "set"}" }
     }
 }
 
@@ -618,6 +620,12 @@ impl PluginProc {
                 out.push(HostAction.Panel(me, panel_of(params, self.log)))
             } else if m.method == "ui/close" {
                 out.push(HostAction.ClosePanel(me, get_str(params, "id")))
+            } else if m.method == "changes/baseline" {
+                let text = match params.get("text") {
+                    case Some(v) { v.as_string() }
+                    case None { None }
+                }
+                out.push(HostAction.Baseline(me, get_str(params, "path").replace("\\", "/"), text))
             } else if m.method == "theme/set" {
                 out.push(HostAction.SetTheme(me, get_str(params, "name")))
             } else if m.method == "theme/define" {
