@@ -123,8 +123,9 @@ to reload it (`r`) or keep yours (`k`).
 
 After a reload dusk shows what changed: added and changed lines get a bar in
 the gutter and a tinted background, and a mark shows where lines were
-removed. `] c` and `[ c` jump between the changes, and `:clear_changes` drops
-the highlights. They compare against the text before the first outside
+removed. `] c` and `[ c` jump between the changes, `g r` puts the change under
+the cursor back as it was (one undo brings it back again), `:diff` opens all
+of them as a unified diff, and `:clear_changes` drops the highlights. They compare against the text before the first outside
 change, so several edits in a row (rook working through a file) add up.
 Themes can set the colors with `ui.diff.add`, `ui.diff.change`, and
 `ui.diff.delete`.

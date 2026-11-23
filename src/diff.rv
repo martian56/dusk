@@ -1,5 +1,6 @@
 // Which lines of a buffer differ from an earlier text, for highlighting what
-// another program (or a plugin such as rook) changed.
+// another program (or a plugin such as rook) changed, reverting one change,
+// and showing them as a unified diff.
 
 // What happened at a row of the new text.
 let SAME = 0
@@ -9,15 +10,23 @@ let CHANGED = 2
 let REMOVED_ABOVE = 3
 
 // The largest middle section (old rows times new rows) compared line by
-// line. Past it, the whole middle counts as changed, which keeps a rewrite of
-// a huge file from stalling the editor.
+// line. Past it, the whole middle counts as one change, which keeps a rewrite
+// of a huge file from stalling the editor.
 let MAX_CELLS = 1000000
 
-// A kind for every row of `new`, compared with `old`.
-fun line_changes(old: list[str], new: list[str]) -> list[int] {
+// Old rows [old_start, old_end) became new rows [new_start, new_end).
+class Hunk {
+    old_start: int
+    old_end: int
+    new_start: int
+    new_end: int
+}
+
+// The changes that turn `old` into `new`, in order.
+fun hunks(old: list[str], new: list[str]) -> list[Hunk] {
+    let out: list[Hunk] = []
     let n = len(old)
     let m = len(new)
-    let kinds = [SAME] * m
     var pre = 0
     while pre < n and pre < m and old[pre] == new[pre] {
         pre += 1
@@ -29,27 +38,14 @@ fun line_changes(old: list[str], new: list[str]) -> list[int] {
     let a = n - pre - suf
     let b = m - pre - suf
     if a == 0 and b == 0 {
-        return kinds
+        return out
     }
-    if b == 0 {
-        mark_removed(kinds, pre)
-        return kinds
+    if a == 0 or b == 0 or a * b > MAX_CELLS {
+        out.push(Hunk(old_start: pre, old_end: pre + a, new_start: pre, new_end: pre + b))
+        return out
     }
-    if a == 0 {
-        for r in range(pre, pre + b) {
-            kinds[r] = ADDED
-        }
-        return kinds
-    }
-    if a * b > MAX_CELLS {
-        for r in range(pre, pre + b) {
-            kinds[r] = CHANGED
-        }
-        return kinds
-    }
-    // Longest common subsequence of the middle rows, then walk it: each run
-    // of removed and added rows becomes changed rows (paired), plus added rows
-    // or a removal marker for what is left over.
+    // Longest common subsequence of the middle rows; every run between two
+    // matched rows is one hunk.
     let w = b + 1
     let table = [0] * ((a + 1) * w)
     var i = a - 1
@@ -67,36 +63,44 @@ fun line_changes(old: list[str], new: list[str]) -> list[int] {
     }
     var x = 0
     var y = 0
-    var removed = 0
-    var added: list[int] = []
+    var hx = 0
+    var hy = 0
     while x < a or y < b {
         if x < a and y < b and old[pre + x] == new[pre + y] {
-            flush(kinds, removed, added, pre + y)
-            removed = 0
-            added = []
+            if x > hx or y > hy {
+                out.push(Hunk(old_start: pre + hx, old_end: pre + x, new_start: pre + hy, new_end: pre + y))
+            }
             x += 1
             y += 1
+            hx = x
+            hy = y
         } else if y < b and (x == a or table[x * w + y + 1] >= table[(x + 1) * w + y]) {
-            added.push(pre + y)
             y += 1
         } else {
-            removed += 1
             x += 1
         }
     }
-    flush(kinds, removed, added, pre + b)
-    return kinds
+    if x > hx or y > hy {
+        out.push(Hunk(old_start: pre + hx, old_end: pre + x, new_start: pre + hy, new_end: pre + y))
+    }
+    return out
 }
 
-// Settle one run of `removed` old rows and `added` new rows, followed by the
-// new row `next`.
-fun flush(kinds: list[int], removed: int, added: list[int], next: int) {
-    for k in range(len(added)) {
-        kinds[added[k]] = CHANGED if k < removed else ADDED
+// A kind for every row of `new`, compared with `old`: rows a hunk replaced
+// are changed (as many as it removed), the rest of its rows added, and a
+// hunk that removed more than it added marks the row after it.
+fun line_changes(old: list[str], new: list[str]) -> list[int] {
+    let kinds = [SAME] * len(new)
+    for h in hunks(old, new) {
+        let removed = h.old_end - h.old_start
+        for r in range(h.new_start, h.new_end) {
+            kinds[r] = CHANGED if r - h.new_start < removed else ADDED
+        }
+        if removed > h.new_end - h.new_start {
+            mark_removed(kinds, h.new_end)
+        }
     }
-    if removed > len(added) {
-        mark_removed(kinds, next)
-    }
+    return kinds
 }
 
 // Mark that rows were removed just above `row`, or below the last row when
@@ -109,6 +113,20 @@ fun mark_removed(kinds: list[int], row: int) {
     if kinds[r] == SAME {
         kinds[r] = REMOVED_ABOVE
     }
+}
+
+// The hunk that `row` of the new text belongs to: a row it replaced or
+// added, or the row just after a pure removal.
+fun hunk_at(hs: list[Hunk], row: int) -> Option[Hunk] {
+    for h in hs {
+        if row >= h.new_start and row < h.new_end {
+            return Some(h)
+        }
+        if h.new_start == h.new_end and row == h.new_start {
+            return Some(h)
+        }
+    }
+    return None
 }
 
 // How many rows were added, changed, and how many removal markers there are.
@@ -126,4 +144,50 @@ fun change_counts(kinds: list[int]) -> (int, int, int) {
         }
     }
     return (added, changed, removed)
+}
+
+// `old` and `new` as a unified diff with `context` unchanged lines around
+// each change, under headers naming `path`.
+fun unified(old: list[str], new: list[str], path: str, context: int) -> list[str] {
+    let out: list[str] = []
+    let hs = hunks(old, new)
+    if len(hs) == 0 {
+        return out
+    }
+    out.push("--- a/${path}")
+    out.push("+++ b/${path}")
+    var k = 0
+    while k < len(hs) {
+        // Merge hunks whose context would touch into one block.
+        var last = k
+        while last + 1 < len(hs) and hs[last + 1].old_start - hs[last].old_end <= 2 * context {
+            last += 1
+        }
+        let os = max(0, hs[k].old_start - context)
+        let oe = min(len(old), hs[last].old_end + context)
+        let ns = max(0, hs[k].new_start - context)
+        let ne = min(len(new), hs[last].new_end + context)
+        out.push("@@ -${os + 1},${oe - os} +${ns + 1},${ne - ns} @@")
+        var o = os
+        for j in range(k, last + 1) {
+            let h = hs[j]
+            while o < h.old_start {
+                out.push(" " + old[o])
+                o += 1
+            }
+            for r in range(h.old_start, h.old_end) {
+                out.push("-" + old[r])
+            }
+            for r in range(h.new_start, h.new_end) {
+                out.push("+" + new[r])
+            }
+            o = h.old_end
+        }
+        while o < oe {
+            out.push(" " + old[o])
+            o += 1
+        }
+        k = last + 1
+    }
+    return out
 }

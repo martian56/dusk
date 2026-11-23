@@ -922,3 +922,25 @@ fun test_reload_highlights_what_changed_on_disk() {
     ed.shutdown_plugins()
     let _ = remove_file(path)
 }
+
+fun test_revert_change_restores_the_baseline_hunk() {
+    let path = "target/revert-test.txt"
+    let _ = write(path, "one\nnew\nthree\nfour\n")
+    let ed = editor("echo", [path])
+    assert_true(ready(ed))
+    ed.ex("fake.baseline")
+    assert_true(wait_for(ed, 5000, e => len(e.change_kinds(e.doc())) > 0))
+    ed.run("next_change", 1)
+    ed.run("revert_change", 1)
+    assert_eq_str(ed.doc().lines[1], "old")
+    assert_eq_int(len(ed.doc().lines), 4)
+    ed.run("next_change", 1)
+    assert_eq_int(ed.doc().row, 3)
+    ed.run("revert_change", 1)
+    assert_eq_int(len(ed.doc().lines), 3)
+    assert_eq_int(len(ed.change_kinds(ed.doc()).filter(k => k != 0)), 0)
+    ed.ex("diff")
+    assert_true(ed.message.contains("no line changes"))
+    ed.shutdown_plugins()
+    let _ = remove_file(path)
+}
