@@ -5,6 +5,7 @@ from std.time import now_millis
 from std.env import current_dir
 from std.process import run_with_input
 from "github.com/martian56/perch/keys" import Key, MouseEvent
+from "github.com/martian56/wingspan" import width
 from "./doc" import Doc, open_doc, clen, csub, cell_col, text_lines
 from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
 from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
@@ -3106,7 +3107,12 @@ impl Ed {
         var col = 0
         var c = 0
         while c < len(cs) {
-            let wch = self.cfg.tab_width - col % self.cfg.tab_width if cs[c] == "\t" else 1
+            var wch = 1
+            if cs[c] == "\t" {
+                wch = self.cfg.tab_width - col % self.cfg.tab_width
+            } else if cs[c].length() > 1 {
+                wch = max(1, width(cs[c]))
+            }
             if col + wch > target {
                 break
             }

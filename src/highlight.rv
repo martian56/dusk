@@ -74,6 +74,32 @@ fun first_non_space(cs: list[str]) -> int {
     return i
 }
 
+// The state after `line` without tokenizing it, when the line cannot change
+// it: one that holds no block comment or multi-line string delimiter keeps the
+// state it starts in. -1 when the line needs a full pass. Jumping to the end
+// of a long file walks every line before it, so this keeps that walk cheap.
+fun quick_end_state(l: Lang, line: str, start: int) -> int {
+    if start == 0 {
+        if l.block_start != "" and line.contains(l.block_start) {
+            return 0 - 1
+        }
+        for m in l.multi {
+            if line.contains(m) {
+                return 0 - 1
+            }
+        }
+        return 0
+    }
+    if start == 1 {
+        return 1 if not line.contains(l.block_end) else 0 - 1
+    }
+    let k = start - 2
+    if k < len(l.multi) and not line.contains(l.multi[k]) {
+        return start
+    }
+    return 0 - 1
+}
+
 fun highlight_line(l: Lang, cs: list[str], start_state: int) -> Spans {
     let out: list[int] = []
     let n = len(cs)

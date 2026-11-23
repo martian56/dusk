@@ -83,3 +83,34 @@ fun test_sideways_wheel_scrolls_long_lines() {
     }
     assert_eq_int(d.left, long.length() - ed.text_w + 1)
 }
+
+fun test_dd_on_an_empty_buffer_stays_clean() {
+    let ed = run_keys("", "dd")
+    assert_false(ed.doc().dirty)
+}
+
+fun test_undo_back_to_the_saved_text_is_clean() {
+    let ed = run_keys("abc", "")
+    ed.doc().path = "target/undo-clean.txt"
+    ed.doc().disk = "abc"
+    for ev in parse_script("xu") {
+        ed.handle_key(ev.key)
+    }
+    assert_eq_str(text(ed), "abc")
+    assert_false(ed.doc().dirty)
+    for ev in parse_script("<c-r>") {
+        ed.handle_key(ev.key)
+    }
+    assert_true(ed.doc().dirty)
+}
+
+fun test_click_lands_after_wide_characters() {
+    let ed = run_keys("日本語abc", "")
+    ed.text_x = 0
+    ed.gutter_w = 0
+    // Each of the three wide characters takes two cells, so cell 6 is "a".
+    let (r, c) = ed.cell_to_pos(6, 1)
+    assert_eq_int(c, 3)
+    let (r2, c2) = ed.cell_to_pos(3, 1)
+    assert_eq_int(c2, 1)
+}
