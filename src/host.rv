@@ -2,6 +2,7 @@
 // The host turns its messages into HostAction values for the editor to
 // apply, and never blocks: everything happens in poll().
 
+from "./theme" import ExtraTheme, extra_theme
 from std.json import JsonValue
 from std.process import Child, start
 from std.time import now_millis
@@ -77,6 +78,9 @@ enum HostAction {
     Prompt(str, int, str, str),
     Marks(str, str, list[Mark]),
     FilesChanged(str, list[str]),
+    SetTheme(str, str),
+    DefineTheme(str, ExtraTheme),
+    ListThemes(str, int),
 }
 
 let BLOCK_KINDS = ["text", "list", "input", "buttons", "progress"]
@@ -190,7 +194,29 @@ fun action_text(a: HostAction) -> str {
         case Prompt(p, id, title, initial) { "prompt:${title}" }
         case Marks(p, path, ms) { "marks:${path}:${len(ms)}" }
         case FilesChanged(p, paths) { "changed:${",".join(paths)}" }
+        case SetTheme(p, name) { "theme:${name}" }
+        case DefineTheme(p, spec) { "define-theme:${spec.name}:${len(spec.colors)}" }
+        case ListThemes(p, id) { "list-themes" }
     }
+}
+
+// A theme/define table such as `colors`, as (name, value) pairs.
+fun pairs_of(v: JsonValue, key: str) -> list[(str, str)] {
+    let out: list[(str, str)] = []
+    match v.get(key) {
+        case Some(c) {
+            match c {
+                case Object(m) {
+                    for k in m.keys() {
+                        out.push((k, get_str(c, k)))
+                    }
+                }
+                case _ {}
+            }
+        }
+        case None {}
+    }
+    return out
 }
 
 // List rows and button labels: a string, or {"label", "detail"}.
@@ -592,6 +618,17 @@ impl PluginProc {
                 out.push(HostAction.Panel(me, panel_of(params, self.log)))
             } else if m.method == "ui/close" {
                 out.push(HostAction.ClosePanel(me, get_str(params, "id")))
+            } else if m.method == "theme/set" {
+                out.push(HostAction.SetTheme(me, get_str(params, "name")))
+            } else if m.method == "theme/define" {
+                let spec = extra_theme(get_str(params, "name"))
+                spec.base = get_str(params, "base")
+                spec.description = get_str(params, "description")
+                spec.colors = pairs_of(params, "colors")
+                spec.styles = pairs_of(params, "styles")
+                spec.glyphs = pairs_of(params, "glyphs")
+                spec.labels = pairs_of(params, "labels")
+                out.push(HostAction.DefineTheme(me, spec))
             } else if m.method == "marks/set" {
                 out.push(HostAction.Marks(me, get_str(params, "path").replace("\\", "/"), marks_of(params)))
             } else {
@@ -615,6 +652,8 @@ impl PluginProc {
             out.push(HostAction.OpenBuffer(me, m.id, get_str(params, "path"), get_int(params, "line", 1)))
         } else if m.method == "ui/pick" {
             out.push(HostAction.Pick(me, m.id, get_str(params, "title"), items_of(params)))
+        } else if m.method == "theme/list" {
+            out.push(HostAction.ListThemes(me, m.id))
         } else if m.method == "ui/prompt" {
             out.push(HostAction.Prompt(me, m.id, get_str(params, "title"), get_str(params, "text")))
         } else {

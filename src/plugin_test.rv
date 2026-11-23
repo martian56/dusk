@@ -870,3 +870,18 @@ fun test_reload_while_selecting_lines_does_not_crash() {
     assert_eq_str(ed.mode, "normal")
     let _ = remove_file(f)
 }
+
+fun test_plugin_defines_sets_and_lists_themes() {
+    let ed = editor("echo", [])
+    assert_true(ready(ed))
+    ed.ex("fake.theme")
+    assert_true(wait_for(ed, 5000, e => e.message.starts_with("themes ")))
+    assert_eq_str(ed.theme.name, "fake-neon")
+    assert_true(ed.message.contains("current fake-neon"))
+    assert_eq_str(ed.theme.g("brand"), " neon ")
+    assert_eq_str(ed.theme.label("normal"), "GLOW")
+    ed.ex("theme no-such-theme")
+    assert_true(ed.message.contains("no theme"))
+    assert_eq_str(ed.theme.name, "fake-neon")
+    ed.shutdown_plugins()
+}

@@ -8,7 +8,15 @@ from "github.com/martian56/perch/keys" import Key, MouseEvent
 from "./doc" import Doc, open_doc, clen, csub
 from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
 from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
-from "./theme" import Theme, make_theme, theme_names
+from "./theme" import (
+    Theme,
+    make_theme,
+    theme_names,
+    has_theme,
+    theme_description,
+    add_theme,
+    load_theme_dir,
+)
 from "./keys" import key_name, default_keys, normalize_binding
 from "./files" import TreeItem, build_tree, all_files, fuzzy_filter
 from std.json import JsonValue
@@ -31,6 +39,7 @@ from "./install" import (
     swap,
     dir_of,
     installed_plugins,
+    installed_theme_dirs,
     remove_installed,
     list_text,
     split_ref,
@@ -229,8 +238,23 @@ let CHANGES = [
     "open_above",
 ]
 
+// Theme files: ~/.config/dusk/themes and the themes of installed plugins.
+// Returns the errors.
+fun load_themes(plugins_dir: str) -> list[str] {
+    let errs = load_theme_dir(config_dir() + "/themes")
+    for d in installed_theme_dirs(plugins_dir) {
+        for e in load_theme_dir(d) {
+            errs.push(e)
+        }
+    }
+    return errs
+}
+
 fun new_editor(paths: list[str]) -> Ed {
     let cfg = load_config()
+    for e in load_themes(config_dir() + "/plugins") {
+        cfg.errors.push(e)
+    }
     // Installed plugins, unless the config already has one by that name.
     for p in installed_plugins(config_dir() + "/plugins") {
         if not cfg.plugins.any(q => q.name == p.name) {
@@ -1344,11 +1368,24 @@ impl Ed {
     }
 
     fun set_theme(self, name: str) {
+        if not has_theme(name) {
+            self.fail("no theme ${name}; :theme lists them")
+            return
+        }
         self.theme = make_theme(name)
         for (k, v) in self.cfg.colors {
             let _ = self.theme.set(k, v)
         }
         self.say("theme: ${self.theme.name}")
+    }
+
+    // theme/list's result: every theme with its description, and the current one.
+    fun themes_json(self) -> JsonValue {
+        let items: list[JsonValue] = []
+        for n in theme_names() {
+            items.push(obj([("name", jstr(n)), ("description", jstr(theme_description(n)))]))
+        }
+        return obj([("themes", JsonValue.Array(items)), ("current", jstr(self.theme.name))])
     }
 
     fun command_names(self) -> list[str] {
@@ -3611,6 +3648,21 @@ impl Ed {
                     case None {}
                 }
             }
+            case SetTheme(p, name) { self.set_theme(name) }
+            case DefineTheme(p, spec) {
+                let err = add_theme(spec)
+                if err != "" {
+                    self.fail("${p}: ${err}")
+                } else if self.theme.name == spec.name.trim() {
+                    self.set_theme(spec.name.trim())
+                }
+            }
+            case ListThemes(p, id) {
+                match from {
+                    case Some(h) { h.respond(id, self.themes_json()) }
+                    case None {}
+                }
+            }
             case _ { self.apply_ui(from, a) }
         }
     }
@@ -4048,6 +4100,11 @@ impl Ed {
             self.stop_plugin(name)
         }
         let msg = swap(self.plugins_dir(), st)
+        if not msg.starts_with("error:") {
+            for e in load_themes(self.plugins_dir()) {
+                self.fail(e)
+            }
+        }
         if msg.starts_with("error:") {
             self.fail(msg)
             if was_running {

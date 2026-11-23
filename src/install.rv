@@ -8,6 +8,9 @@
 //     args = []
 //     activation = ["startup"]
 //     build = ["rvpm", "build"]     # optional, run in the plugin's directory
+//     themes = "themes"             # optional, a directory of theme files
+//
+// A plugin that only ships themes needs no command.
 //
 //     [windows]                     # command and build may differ per platform
 //     command = "./todo.exe"
@@ -30,6 +33,7 @@ class Manifest {
     args: list[str]
     activation: list[str]
     build: list[str]
+    themes: str = ""
 }
 
 fun read_manifest(dir: str) -> Result[Manifest, str] {
@@ -49,8 +53,9 @@ fun read_manifest(dir: str) -> Result[Manifest, str] {
     var command = t.get_string_or("command", "")
     let platform = "windows" if os_name() == "windows" else "linux"
     command = t.get_string_or("${platform}.command", command)
-    if name == "" or command == "" {
-        return Err("${MANIFEST} needs a name and a command")
+    let themes = t.get_string_or("themes", "")
+    if name == "" or (command == "" and themes == "") {
+        return Err("${MANIFEST} needs a name and a command or themes")
     }
     let activation = t.get_strings("activation")
     let own_build = t.get_strings("${platform}.build")
@@ -63,6 +68,7 @@ fun read_manifest(dir: str) -> Result[Manifest, str] {
             args: t.get_strings("args"),
             activation: activation if len(activation) > 0 else ["startup"],
             build: own_build if len(own_build) > 0 else t.get_strings("build"),
+            themes: themes,
         ),
     )
 }
@@ -351,6 +357,9 @@ fun installed(plugins_dir: str) -> list[(str, Manifest)] {
 fun installed_plugins(plugins_dir: str) -> list[Plugin] {
     let out: list[Plugin] = []
     for (dir, m) in installed(plugins_dir) {
+        if m.command == "" {
+            continue
+        }
         out.push(
             Plugin(
                 name: m.name,
@@ -366,6 +375,21 @@ fun installed_plugins(plugins_dir: str) -> list[Plugin] {
                 installed: true,
             ),
         )
+    }
+    return out
+}
+
+// Theme directories of installed plugins.
+fun installed_theme_dirs(plugins_dir: str) -> list[str] {
+    let out: list[str] = []
+    for (dir, m) in installed(plugins_dir) {
+        if m.themes != "" {
+            var rel = m.themes.replace("\\", "/")
+            if rel.starts_with("./") {
+                rel = rel.substring(2, rel.length())
+            }
+            out.push("${dir}/${rel}")
+        }
     }
     return out
 }

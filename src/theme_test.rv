@@ -1,0 +1,133 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
+from std.fs import write, create_dir_all
+from "github.com/martian56/plumage/style" import Color
+from "github.com/martian56/raven-toml" import parse
+from "./config" import Config, apply
+from "./theme" import (
+    add_theme,
+    extra_theme,
+    BOLD,
+    ITALIC,
+    UNDERLINE,
+    DIM,
+    make_theme,
+    theme_names,
+    has_theme,
+    theme_description,
+    define_theme,
+    load_theme_dir,
+)
+
+fun rgb(c: Color) -> str {
+    return match c {
+        case Rgb(r, g, b) { "${r},${g},${b}" }
+        case _ { "other" }
+    }
+}
+
+fun test_defined_theme_overlays_its_base() {
+    assert_eq_str(define_theme("t-overlay", "nord", "cold", [("ui.bg", "#010203")]), "")
+    let t = make_theme("t-overlay")
+    assert_eq_str(t.name, "t-overlay")
+    assert_eq_str(rgb(t.c("ui.bg")), "1,2,3")
+    assert_eq_str(rgb(t.c("ui.fg")), rgb(make_theme("nord").c("ui.fg")))
+    assert_true(has_theme("t-overlay"))
+    assert_eq_str(theme_description("t-overlay"), "cold")
+}
+
+fun test_bad_definitions_are_refused() {
+    assert_true(define_theme("nord", "dusk", "", []) != "")
+    assert_true(define_theme(" ", "dusk", "", []) != "")
+    assert_true(define_theme("t-bad", "dusk", "", [("ui.bg", "pink")]) != "")
+    assert_false(has_theme("t-bad"))
+}
+
+fun test_redefining_replaces_in_place() {
+    let _ = define_theme("t-twice", "dusk", "", [("ui.bg", "#000000")])
+    let before = len(theme_names())
+    let _ = define_theme("t-twice", "dusk", "", [("ui.bg", "#ffffff")])
+    assert_eq_int(len(theme_names()), before)
+    assert_eq_str(rgb(make_theme("t-twice").c("ui.bg")), "255,255,255")
+}
+
+fun test_theme_files_load_from_a_directory() {
+    let dir = "target/theme-test"
+    let _ = create_dir_all(dir)
+    let _ = write(
+        "${dir}/a.toml",
+        "name = \"t-file\"\ndescription = \"from a file\"\nbase = \"gruvbox\"\n\n[colors]\n\"ui.bg\" = \"#0a0b0c\"\nkeyword = \"#ff0000\"\n",
+    )
+    let _ = write("${dir}/b.toml", "name = \"t-broken\"\n[colors]\n\"ui.bg\" = \"nope\"\n")
+    let _ = write("${dir}/notes.txt", "not a theme")
+    let errs = load_theme_dir(dir)
+    assert_eq_int(len(errs), 1)
+    assert_true(errs[0].contains("b.toml"))
+    let t = make_theme("t-file")
+    assert_eq_str(rgb(t.c("ui.bg")), "10,11,12")
+    assert_eq_str(rgb(t.c("keyword")), "255,0,0")
+    assert_eq_str(theme_description("t-file"), "from a file")
+}
+
+fun test_unknown_theme_falls_back_to_dusk() {
+    assert_eq_str(make_theme("no-such-theme").name, "dusk")
+    assert_false(has_theme("no-such-theme"))
+}
+
+fun test_config_overrides_dotted_ui_colors() {
+    let cfg = Config()
+    apply(cfg, parse("[theme]\n\"ui.bg\" = \"#123456\"\nkeyword = \"#abcdef\"\n").unwrap())
+    assert_eq_int(len(cfg.colors), 2)
+    let (k, v) = cfg.colors[0]
+    assert_eq_str(k, "ui.bg")
+    assert_eq_str(v, "#123456")
+}
+
+fun test_styles_glyphs_and_labels_apply() {
+    let spec = extra_theme("t-fancy")
+    spec.styles = [("keyword", "underline"), ("string", "bold italic"), ("comment", "none")]
+    spec.glyphs = [("brand", " ~fancy~ "), ("tree.open", "-")]
+    spec.labels = [("normal", "CHILL")]
+    assert_eq_str(add_theme(spec), "")
+    let t = make_theme("t-fancy")
+    assert_eq_int(t.style("keyword"), UNDERLINE)
+    assert_eq_int(t.style("string"), BOLD | ITALIC)
+    assert_eq_int(t.style("comment"), 0)
+    assert_eq_str(t.g("brand"), " ~fancy~ ")
+    assert_eq_str(t.g("tree.open"), "-")
+    assert_eq_str(t.g("tree.closed"), "▸")
+    assert_eq_str(t.label("normal"), "CHILL")
+    assert_eq_str(t.label("insert"), "INSERT")
+    let plain = make_theme("dusk")
+    assert_eq_int(plain.style("keyword"), BOLD)
+    assert_eq_int(plain.style("comment"), ITALIC)
+}
+
+fun test_bad_extras_are_refused() {
+    let bad_style = extra_theme("t-x1")
+    bad_style.styles = [("keyword", "sparkly")]
+    assert_true(add_theme(bad_style).contains("style"))
+    let wide = extra_theme("t-x2")
+    wide.glyphs = [("tab.sep", "||")]
+    assert_true(add_theme(wide).contains("glyph"))
+    let unknown = extra_theme("t-x3")
+    unknown.glyphs = [("sparkle", "*")]
+    assert_true(add_theme(unknown).contains("no glyph"))
+    let long_label = extra_theme("t-x4")
+    long_label.labels = [("normal", "SUPERCALIFRAGILISTIC")]
+    assert_true(add_theme(long_label).contains("label"))
+    assert_false(has_theme("t-x1") or has_theme("t-x2") or has_theme("t-x3") or has_theme("t-x4"))
+}
+
+fun test_theme_file_reads_every_section() {
+    let dir = "target/theme-test-2"
+    let _ = create_dir_all(dir)
+    let _ = write(
+        "${dir}/f.toml",
+        "name = \"t-sections\"\n[styles]\nkeyword = \"italic\"\n[glyphs]\n\"tab.dirty\" = \"*\"\n[labels]\ninsert = \"TYPE\"\n",
+    )
+    assert_eq_int(len(load_theme_dir(dir)), 0)
+    let t = make_theme("t-sections")
+    assert_eq_int(t.style("keyword"), ITALIC)
+    assert_eq_str(t.g("tab.dirty"), "*")
+    assert_eq_str(t.label("insert"), "TYPE")
+}
