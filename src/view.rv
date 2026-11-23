@@ -311,6 +311,7 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
         case None {}
     }
     let show_cursor = ed.mode == "normal" or ed.mode == "insert" or ed.mode == "visual" or ed.mode == "vline"
+    let changes = ed.change_kinds(d)
     for i in range(h) {
         let y = 1 + i
         let r = d.top + i
@@ -319,7 +320,13 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
             continue
         }
         let is_cur = r == d.row
-        let row_bg = t.c("ui.cursorline") if is_cur and ed.mode != "visual" and ed.mode != "vline" else t.c("ui.bg")
+        let change = changes[r] if r < len(changes) else 0
+        var row_bg = t.c("ui.cursorline") if is_cur and ed.mode != "visual" and ed.mode != "vline" else t.c("ui.bg")
+        if change == 1 and not is_cur {
+            row_bg = t.c("ui.diff.add.bg")
+        } else if change == 2 and not is_cur {
+            row_bg = t.c("ui.diff.change.bg")
+        }
         fill_row(buf, x0, buf.w, y, Style.new().bg(row_bg))
         if gutter > 0 {
             var num = r + 1
@@ -330,6 +337,16 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
             let gst = Style.new().fg(t.c("ui.gutter.current") if is_cur else t.c("ui.gutter")).bg(row_bg)
             if ed.cfg.numbers != "off" {
                 let _ = put(buf, x0 + gutter - 2 - label.length(), y, label, gst)
+            }
+            if change == 1 or change == 2 {
+                buf.set(
+                    x0,
+                    y,
+                    "▎",
+                    Style.new().fg(t.c("ui.diff.add") if change == 1 else t.c("ui.diff.change")).bg(row_bg),
+                )
+            } else if change == 3 {
+                buf.set(x0, y, "▔", Style.new().fg(t.c("ui.diff.delete")).bg(row_bg))
             }
             match ed.mark_at(d.path, r) {
                 case Some(m) {

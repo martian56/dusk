@@ -5,9 +5,10 @@ from std.time import now_millis
 from std.env import current_dir
 from std.process import run_with_input
 from "github.com/martian56/perch/keys" import Key, MouseEvent
-from "./doc" import Doc, open_doc, clen, csub, cell_col
+from "./doc" import Doc, open_doc, clen, csub, cell_col, text_lines
 from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
 from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
+from "./diff" import line_changes, change_counts
 from "./theme" import (
     Theme,
     make_theme,
@@ -196,6 +197,11 @@ class Plugins {
     asking: bool = false
     // Path -> plugin -> its marks for that file.
     marks: dict[str, dict[str, list[Mark]]] = {}
+    // Path -> the text its change highlights compare against, set when the
+    // file changes on disk or by a plugin (changes/baseline). The generation
+    // bumps on every change so cached row kinds are recomputed.
+    bases: dict[str, list[str]] = {}
+    bases_gen: int = 0
     // Where :plugin install puts plugins; "" means ~/.config/dusk/plugins.
     install_root: str = ""
     jobs: list[Job] = []
@@ -1912,6 +1918,13 @@ impl Ed {
         } else if name == "help" {
             self.mode = "help"
             self.help_top = 0
+        } else if name == "next_change" {
+            self.jump_change(true)
+        } else if name == "prev_change" {
+            self.jump_change(false)
+        } else if name == "clear_changes" {
+            self.clear_base(self.doc().path)
+            self.say("change highlights cleared")
         } else if name == "next_theme" {
             let names = theme_names()
             let at = names.index_of(self.theme.name).unwrap_or(0)
@@ -3281,6 +3294,21 @@ impl Ed {
     }
 }
 
+// "2 added, 1 changed, 1 removed", leaving out zero counts.
+fun change_summary(added: int, changed: int, removed: int) -> str {
+    let parts: list[str] = []
+    if added > 0 {
+        parts.push("${added} added")
+    }
+    if changed > 0 {
+        parts.push("${changed} changed")
+    }
+    if removed > 0 {
+        parts.push("${removed} removed")
+    }
+    return "no line changes" if len(parts) == 0 else ", ".join(parts)
+}
+
 // Every built-in command with a short description, for the palette and help.
 let COMMANDS = [
     ("focus_next", "focus the next plugin panel (F6)"),
@@ -3304,6 +3332,9 @@ let COMMANDS = [
     ("reload", "re-read the file from disk"),
     ("open_config", "edit ~/.config/dusk/config.toml"),
     ("help", "keys and commands"),
+    ("next_change", "jump to the next change made outside dusk"),
+    ("prev_change", "jump to the previous change made outside dusk"),
+    ("clear_changes", "stop highlighting outside changes in this file"),
     ("next_theme", "cycle the color theme"),
     ("pick_theme", "choose a color theme"),
     ("pick_language", "set the file's language"),
@@ -3676,6 +3707,12 @@ impl Ed {
                 }
             }
             case SetTheme(p, name) { self.set_theme(name) }
+            case Baseline(p, path, text) {
+                match text {
+                    case Some(t) { self.set_base(path, text_lines(t)) }
+                    case None { self.clear_base(path) }
+                }
+            }
             case DefineTheme(p, spec) {
                 let err = add_theme(spec)
                 if err != "" {
@@ -3909,6 +3946,11 @@ impl Ed {
         if "\n".join(fresh.lines) == "\n".join(d.lines) {
             return
         }
+        // Highlight what changed, against the text before the first outside
+        // change (a plugin may already have set a baseline).
+        if not self.plug.bases.has(d.path) {
+            self.set_base(d.path, d.lines.copy())
+        }
         d.checkpoint()
         d.lines = fresh.lines
         d.clamp()
@@ -3920,7 +3962,10 @@ impl Ed {
         self.anchor_row = min(self.anchor_row, len(self.doc().lines) - 1)
         self.anchor_col = 0 if self.anchor_row < 0 else min(self.anchor_col, self.doc().line_len(max(0, self.anchor_row)))
         self.anchor_row = max(0, self.anchor_row)
-        self.say("reloaded ${d.path}, changed by ${who}")
+        let (added, changed, removed) = change_counts(self.change_kinds(d))
+        self.say(
+            "reloaded ${d.path}, changed by ${who}: ${change_summary(added, changed, removed)}; ] c jumps to a change",
+        )
     }
 
     fun ask_disk(self) {
@@ -4156,6 +4201,58 @@ impl Ed {
         }
         self.activate_for_language()
         self.say(msg)
+    }
+
+    // Compare `path` against `lines` from now on.
+    fun set_base(self, path: str, lines: list[str]) {
+        self.plug.bases.set(path, lines)
+        self.plug.bases_gen += 1
+    }
+
+    fun clear_base(self, path: str) {
+        let _ = self.plug.bases.remove(path)
+        self.plug.bases_gen += 1
+    }
+
+    // Change kinds per row of `d` (see diff.rv), empty without a baseline.
+    fun change_kinds(self, d: Doc) -> list[int] {
+        match self.plug.bases.get(d.path) {
+            case Some(base) {
+                if d.kinds_version != d.version or d.kinds_gen != self.plug.bases_gen or len(d.kinds) != len(
+                    d.lines,
+                ) {
+                    d.kinds = line_changes(base, d.lines)
+                    d.kinds_version = d.version
+                    d.kinds_gen = self.plug.bases_gen
+                }
+                return d.kinds
+            }
+            case None {}
+        }
+        let none: list[int] = []
+        return none
+    }
+
+    // Move to the start of the next (or previous) changed block.
+    fun jump_change(self, forward: bool) {
+        let d = self.doc()
+        let ks = self.change_kinds(d)
+        if not ks.any(k => k != 0) {
+            self.say("no changes to jump to")
+            return
+        }
+        let n = len(ks)
+        var r = d.row
+        for step in range(n) {
+            r = (r + 1) % n if forward else (r - 1 + n) % n
+            if ks[r] != 0 and (r == 0 or ks[r - 1] == 0 or ks[r] == 3) {
+                self.go_vert(r)
+                d.col = 0
+                let (added, changed, removed) = change_counts(ks)
+                self.say("change at line ${r + 1}; ${change_summary(added, changed, removed)}")
+                return
+            }
+        }
     }
 
     fun has_marks(self, path: str) -> bool {

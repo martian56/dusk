@@ -1,0 +1,129 @@
+// Which lines of a buffer differ from an earlier text, for highlighting what
+// another program (or a plugin such as rook) changed.
+
+// What happened at a row of the new text.
+let SAME = 0
+let ADDED = 1
+let CHANGED = 2
+// The row is unchanged, but lines were removed just above it.
+let REMOVED_ABOVE = 3
+
+// The largest middle section (old rows times new rows) compared line by
+// line. Past it, the whole middle counts as changed, which keeps a rewrite of
+// a huge file from stalling the editor.
+let MAX_CELLS = 1000000
+
+// A kind for every row of `new`, compared with `old`.
+fun line_changes(old: list[str], new: list[str]) -> list[int] {
+    let n = len(old)
+    let m = len(new)
+    let kinds = [SAME] * m
+    var pre = 0
+    while pre < n and pre < m and old[pre] == new[pre] {
+        pre += 1
+    }
+    var suf = 0
+    while suf < n - pre and suf < m - pre and old[n - 1 - suf] == new[m - 1 - suf] {
+        suf += 1
+    }
+    let a = n - pre - suf
+    let b = m - pre - suf
+    if a == 0 and b == 0 {
+        return kinds
+    }
+    if b == 0 {
+        mark_removed(kinds, pre)
+        return kinds
+    }
+    if a == 0 {
+        for r in range(pre, pre + b) {
+            kinds[r] = ADDED
+        }
+        return kinds
+    }
+    if a * b > MAX_CELLS {
+        for r in range(pre, pre + b) {
+            kinds[r] = CHANGED
+        }
+        return kinds
+    }
+    // Longest common subsequence of the middle rows, then walk it: each run
+    // of removed and added rows becomes changed rows (paired), plus added rows
+    // or a removal marker for what is left over.
+    let w = b + 1
+    let table = [0] * ((a + 1) * w)
+    var i = a - 1
+    while i >= 0 {
+        var j = b - 1
+        while j >= 0 {
+            if old[pre + i] == new[pre + j] {
+                table[i * w + j] = table[(i + 1) * w + j + 1] + 1
+            } else {
+                table[i * w + j] = max(table[(i + 1) * w + j], table[i * w + j + 1])
+            }
+            j -= 1
+        }
+        i -= 1
+    }
+    var x = 0
+    var y = 0
+    var removed = 0
+    var added: list[int] = []
+    while x < a or y < b {
+        if x < a and y < b and old[pre + x] == new[pre + y] {
+            flush(kinds, removed, added, pre + y)
+            removed = 0
+            added = []
+            x += 1
+            y += 1
+        } else if y < b and (x == a or table[x * w + y + 1] >= table[(x + 1) * w + y]) {
+            added.push(pre + y)
+            y += 1
+        } else {
+            removed += 1
+            x += 1
+        }
+    }
+    flush(kinds, removed, added, pre + b)
+    return kinds
+}
+
+// Settle one run of `removed` old rows and `added` new rows, followed by the
+// new row `next`.
+fun flush(kinds: list[int], removed: int, added: list[int], next: int) {
+    for k in range(len(added)) {
+        kinds[added[k]] = CHANGED if k < removed else ADDED
+    }
+    if removed > len(added) {
+        mark_removed(kinds, next)
+    }
+}
+
+// Mark that rows were removed just above `row`, or below the last row when
+// they were removed from the end.
+fun mark_removed(kinds: list[int], row: int) {
+    if len(kinds) == 0 {
+        return
+    }
+    let r = min(row, len(kinds) - 1)
+    if kinds[r] == SAME {
+        kinds[r] = REMOVED_ABOVE
+    }
+}
+
+// How many rows were added, changed, and how many removal markers there are.
+fun change_counts(kinds: list[int]) -> (int, int, int) {
+    var added = 0
+    var changed = 0
+    var removed = 0
+    for k in kinds {
+        if k == ADDED {
+            added += 1
+        } else if k == CHANGED {
+            changed += 1
+        } else if k == REMOVED_ABOVE {
+            removed += 1
+        }
+    }
+    return (added, changed, removed)
+}

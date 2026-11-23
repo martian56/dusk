@@ -177,6 +177,8 @@ fun default_keys() -> dict[str, dict[str, str]] {
             ("~", "toggle_case"),
             ("g c c", "toggle_comment"),
             ("g t", "next_buffer"),
+            ("] c", "next_change"),
+            ("[ c", "prev_change"),
             ("g T", "prev_buffer"),
             ("] b", "next_buffer"),
             ("[ b", "prev_buffer"),

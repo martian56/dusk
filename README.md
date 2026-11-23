@@ -121,6 +121,14 @@ changes an open file. A buffer without unsaved edits reloads, and one undo
 brings back what you had; for a buffer with unsaved edits dusk asks whether
 to reload it (`r`) or keep yours (`k`).
 
+After a reload dusk shows what changed: added and changed lines get a bar in
+the gutter and a tinted background, and a mark shows where lines were
+removed. `] c` and `[ c` jump between the changes, and `:clear_changes` drops
+the highlights. They compare against the text before the first outside
+change, so several edits in a row (rook working through a file) add up.
+Themes can set the colors with `ui.diff.add`, `ui.diff.change`, and
+`ui.diff.delete`.
+
 ## Plugins
 
 A plugin is a program dusk runs as a command named `plugin.<name>`. It can

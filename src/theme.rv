@@ -56,6 +56,25 @@ fun extra_theme(name: str) -> ExtraTheme = ExtraTheme(
     colors: [],
 )
 
+// `b` mixed into `a` by `pct` percent, for two RGB colors; `a` otherwise.
+fun blend(a: Color, b: Color, pct: int) -> Color {
+    return match a {
+        case Rgb(r1, g1, b1) {
+            match b {
+                case Rgb(r2, g2, b2) {
+                    Color.Rgb(
+                        r1 + (r2 - r1) * pct / 100,
+                        g1 + (g2 - g1) * pct / 100,
+                        b1 + (b2 - b1) * pct / 100,
+                    )
+                }
+                case _ { a }
+            }
+        }
+        case _ { a }
+    }
+}
+
 // Style bits for syntax kinds.
 let BOLD = 1
 let ITALIC = 2
@@ -550,7 +569,29 @@ impl Theme {
     }
 
     fun c(self, name: str) -> Color {
-        return self.colors.get(name).unwrap_or(Color.Default)
+        match self.colors.get(name) {
+            case Some(c) {
+                return c
+            }
+            case None {}
+        }
+        // Change highlights follow the theme's own mode colors unless it sets
+        // them, and their line tints blend that color into the background.
+        if name == "ui.diff.add" {
+            return self.c("ui.mode.insert")
+        }
+        if name == "ui.diff.change" {
+            return self.c("ui.mode.command")
+        }
+        if name == "ui.diff.delete" {
+            return self.c("ui.error")
+        }
+        if name.starts_with("ui.diff.") and name.ends_with(".bg") {
+            let tinted = blend(self.c("ui.bg"), self.c(name.substring(0, name.length() - 3)), 18)
+            self.colors.set(name, tinted)
+            return tinted
+        }
+        return Color.Default
     }
 
     fun set(self, name: str, value: str) -> bool {

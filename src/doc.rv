@@ -35,6 +35,11 @@ class Doc {
     disk: str = ""
     // The file's modification time when dusk last read or wrote it.
     mtime: int = 0 - 1
+    // Change kinds per row against the file's baseline (see Ed.change_kinds),
+    // and the version and baseline generation they were computed for.
+    kinds: list[int] = []
+    kinds_version: int = 0 - 1
+    kinds_gen: int = 0 - 1
 }
 
 fun clen(s: str) -> int = len(s.chars())
@@ -47,6 +52,16 @@ fun csub(s: str, a: int, b: int) -> str {
         out += cs[i]
     }
     return out
+}
+
+// A file's text as buffer lines: CRLF read as LF, and no empty last line for
+// the final newline, as open_doc reads it.
+fun text_lines(text: str) -> list[str] {
+    let lines = split_lines(text.replace("\r\n", "\n"))
+    if len(lines) > 1 and lines[len(lines) - 1] == "" {
+        let _ = lines.pop()
+    }
+    return lines
 }
 
 fun split_lines(text: str) -> list[str] {
