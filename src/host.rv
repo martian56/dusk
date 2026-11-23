@@ -77,6 +77,9 @@ enum HostAction {
     Prompt(str, int, str, str),
     Marks(str, str, list[Mark]),
     FilesChanged(str, list[str]),
+    SetTheme(str, str),
+    DefineTheme(str, str, str, str, list[(str, str)]),
+    ListThemes(str, int),
 }
 
 let BLOCK_KINDS = ["text", "list", "input", "buttons", "progress"]
@@ -190,7 +193,29 @@ fun action_text(a: HostAction) -> str {
         case Prompt(p, id, title, initial) { "prompt:${title}" }
         case Marks(p, path, ms) { "marks:${path}:${len(ms)}" }
         case FilesChanged(p, paths) { "changed:${",".join(paths)}" }
+        case SetTheme(p, name) { "theme:${name}" }
+        case DefineTheme(p, name, base, d, cs) { "define-theme:${name}:${len(cs)}" }
+        case ListThemes(p, id) { "list-themes" }
     }
+}
+
+// The `colors` object of a theme/define, as (name, "#rrggbb") pairs.
+fun colors_of(v: JsonValue) -> list[(str, str)] {
+    let out: list[(str, str)] = []
+    match v.get("colors") {
+        case Some(c) {
+            match c {
+                case Object(m) {
+                    for k in m.keys() {
+                        out.push((k, get_str(c, k)))
+                    }
+                }
+                case _ {}
+            }
+        }
+        case None {}
+    }
+    return out
 }
 
 // List rows and button labels: a string, or {"label", "detail"}.
@@ -592,6 +617,18 @@ impl PluginProc {
                 out.push(HostAction.Panel(me, panel_of(params, self.log)))
             } else if m.method == "ui/close" {
                 out.push(HostAction.ClosePanel(me, get_str(params, "id")))
+            } else if m.method == "theme/set" {
+                out.push(HostAction.SetTheme(me, get_str(params, "name")))
+            } else if m.method == "theme/define" {
+                out.push(
+                    HostAction.DefineTheme(
+                        me,
+                        get_str(params, "name"),
+                        get_str(params, "base"),
+                        get_str(params, "description"),
+                        colors_of(params),
+                    ),
+                )
             } else if m.method == "marks/set" {
                 out.push(HostAction.Marks(me, get_str(params, "path").replace("\\", "/"), marks_of(params)))
             } else {
@@ -615,6 +652,8 @@ impl PluginProc {
             out.push(HostAction.OpenBuffer(me, m.id, get_str(params, "path"), get_int(params, "line", 1)))
         } else if m.method == "ui/pick" {
             out.push(HostAction.Pick(me, m.id, get_str(params, "title"), items_of(params)))
+        } else if m.method == "theme/list" {
+            out.push(HostAction.ListThemes(me, m.id))
         } else if m.method == "ui/prompt" {
             out.push(HostAction.Prompt(me, m.id, get_str(params, "title"), get_str(params, "text")))
         } else {

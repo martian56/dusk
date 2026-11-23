@@ -110,6 +110,7 @@ fun contributions() -> JsonValue {
         ("fake.close", "Close the panel"),
         ("fake.touch", "Change the file on disk"),
         ("fake.sel", "Echo the selection"),
+        ("fake.theme", "Define and pick a theme"),
     ] {
         cmds.push(obj([("name", s(n)), ("title", s(t))]))
     }
@@ -174,6 +175,21 @@ fun handle(st: State, line: str) -> bool {
                     }
                     let said = "cancelled" if cancelled else "typed ${str_of(res, "text")}"
                     notify("ui/message", obj([("text", s(said))]))
+                }
+                if purpose == "themes" {
+                    var n = 0
+                    match res.get("themes") {
+                        case Some(t) {
+                            match t {
+                                case Array(items) {
+                                    n = len(items)
+                                }
+                                case _ {}
+                            }
+                        }
+                        case None {}
+                    }
+                    notify("ui/message", obj([("text", s("themes ${n} current ${str_of(res, "current")}"))]))
                 }
                 if purpose == "count" {
                     notify(
@@ -251,6 +267,22 @@ fun handle(st: State, line: str) -> bool {
             let _ = write(path, "changed on disk\n")
             notify("files/changed", obj([("paths", json_array([s(path)]))]))
             reply(id, obj([]))
+        } else if cmd == "fake.theme" {
+            let colors = obj([("ui.bg", s("#101820")), ("keyword", s("#ff00aa"))])
+            notify(
+                "theme/define",
+                obj(
+                    [
+                        ("name", s("fake-neon")),
+                        ("base", s("nord")),
+                        ("description", s("test")),
+                        ("colors", colors),
+                    ],
+                ),
+            )
+            notify("theme/define", obj([("name", s("broken")), ("colors", obj([("ui.bg", s("pink"))]))]))
+            notify("theme/set", obj([("name", s("fake-neon"))]))
+            ask(st, "theme/list", obj([]), "themes", id)
         } else if cmd == "fake.die" {
             exit(4)
         } else if cmd == "fake.count" {

@@ -48,7 +48,8 @@ mainstream Linux terminal.
 - **Editing help**: auto-indent, auto-closing brackets and quotes, comment
   toggling for every language, indent guides, matching-bracket highlight,
   search highlight, `:s` and `:%s` replace, `:sort`.
-- **Themes**: dusk, dawn (light), gruvbox, and nord, plus per-color overrides.
+- **Themes**: dusk, dawn (light), gruvbox, and nord, plus per-color overrides,
+  theme files, and themes from plugins.
 
 ## Configuration
 
@@ -73,6 +74,29 @@ keyword = "#ff79c6"
 ```
 
 Any command from the palette (`Ctrl+K`) can be bound in any mode.
+
+## Themes
+
+`:theme` picks a theme, `:theme <name>` switches to one, and `Ctrl+T` cycles
+through them. Besides the four built-in themes, dusk loads theme files from
+`~/.config/dusk/themes/*.toml`:
+
+```toml
+name = "harbor"
+description = "Fog over a dark harbor"
+base = "nord"            # optional; colors not listed come from it
+
+[colors]
+"ui.bg" = "#1b2330"
+keyword = "#e0a458"
+```
+
+Color names are the syntax kinds (`keyword`, `string`, `comment`, ...) and the
+interface names under `ui.` (`ui.bg`, `ui.cursor`, `ui.mode.insert`, ...).
+Plugins add themes too: an installed plugin whose `dusk-plugin.toml` sets
+`themes = "themes"` contributes every file in that directory, and a running
+plugin can define and switch themes over the protocol. For a large set, try
+`:plugin install github.com/martian56/dusk-theme`.
 
 ## Files changed elsewhere
 
@@ -149,10 +173,13 @@ command = "./todo"            # relative to the plugin's directory, or on PATH
 args = []
 activation = ["startup"]
 build = ["rvpm", "build"]     # optional, run once after cloning
+themes = "themes"             # optional, a directory of theme files
 
 [windows]                     # command and build may differ per platform
 command = "./todo.exe"
 ```
+
+A plugin that only ships themes can leave out `command`.
 
 A `[[plugin]]` entry in `config.toml` with the same name wins over an
 installed one, which helps while developing a plugin.

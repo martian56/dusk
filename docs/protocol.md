@@ -215,6 +215,31 @@ Params: `{"title", "text"}`, where `text` is the initial input. Result:
 A pick or prompt that arrives while the user is typing or another one is
 open waits until dusk is back in normal mode.
 
+## Themes
+
+### theme/define (notification from a plugin)
+
+Adds a theme, or replaces one the plugin defined before. Colors not listed
+come from `base`, a built-in theme (`dusk` when absent). Every color must be
+`#rrggbb`; a bad one rejects the whole theme and dusk says why. Redefining
+the current theme repaints it.
+
+```json
+{"name": "synthwave", "base": "dusk", "description": "Neon over a purple night", "colors": {"ui.bg": "#241b2f", "keyword": "#fede5d"}}
+```
+
+### theme/set (notification from a plugin)
+
+Params: `{"name"}`. Switches to that theme; an unknown name is reported and
+the current theme stays.
+
+### theme/list (request from a plugin)
+
+No params. Result: `{"themes": [{"name", "description"}], "current"}`.
+
+Plugins can also ship theme files with no code at all: see `themes` in
+`dusk-plugin.toml`.
+
 ### marks/set (notification from a plugin)
 
 Replaces the plugin's marks on a file, which need not be open yet.

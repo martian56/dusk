@@ -103,7 +103,7 @@ fun apply(cfg: Config, t: Toml) {
     cfg.mouse = t.get_bool_or("editor.mouse", cfg.mouse)
     cfg.clipboard = t.get_string_or("editor.clipboard", cfg.clipboard)
     cfg.scroll_off = t.get_int_or("editor.scroll_off", cfg.scroll_off)
-    for k in t.keys("theme") {
+    for k in t.keys_under("theme") {
         cfg.colors.push((k, t.get_string_or("theme.${k}", "")))
     }
     for mode in ["global", "normal", "insert", "visual"] {
@@ -182,7 +182,7 @@ let SAMPLE_CONFIG = """# dusk configuration. Lines starting with # are comments.
 # directory is read after it and wins.
 
 [editor]
-theme = "dusk"            # dusk, dawn, gruvbox, nord
+theme = "dusk"            # dusk, dawn, gruvbox, nord, or a theme file's name
 tab_width = 4
 expand_tabs = true
 line_numbers = "absolute" # absolute, relative, off
@@ -192,7 +192,9 @@ mouse = true
 scroll_off = 3
 # clipboard = "clip"      # a command that receives yanked text on stdin
 
-# Override any color by name (see :help colors).
+# Override any color by name (see :help colors). Whole themes go in
+# ~/.config/dusk/themes/<name>.toml, with a name, an optional base theme, and
+# a [colors] table like this one.
 [theme]
 # keyword = "#c678dd"
 # "ui.bg" = "#101418"
