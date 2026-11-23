@@ -362,7 +362,8 @@ fun mouse_at(kind: MouseKind, button: int, spec: str) -> Option[MouseEvent] {
 }
 
 // `ihello<esc>:w<cr>`, `<c-s>`, `<click:10,4>`, `<drag:12,4>`,
-// `<release:12,4>`, `<wheeldown:10,4>`, `<wheelup:10,4>`, `<sleep:500>`.
+// `<release:12,4>`, `<wheeldown:10,4>`, `<wheelup:10,4>`, `<wheelleft:10,4>`,
+// `<wheelright:10,4>`, `<sleep:500>`.
 fun parse_script(s: str) -> list[ScriptEvent] {
     let out: list[ScriptEvent] = []
     let cs = s.chars()
@@ -403,6 +404,14 @@ fun parse_script(s: str) -> list[ScriptEvent] {
                         ev = mouse_at(MouseKind.ScrollDown, -1, spec)
                     } else if what == "wheelup" {
                         ev = mouse_at(MouseKind.ScrollUp, -1, spec)
+                    } else if what == "wheelleft" or what == "wheelright" {
+                        let kind = MouseKind.ScrollUp if what == "wheelleft" else MouseKind.ScrollDown
+                        match mouse_at(kind, -1, spec) {
+                            case Some(m) {
+                                ev = Some(MouseEvent(kind: m.kind, button: -1, x: m.x, y: m.y, mods: 1))
+                            }
+                            case None {}
+                        }
                     } else if what == "middle" {
                         ev = mouse_at(MouseKind.Down, 1, spec)
                     } else if what == "sclick" {

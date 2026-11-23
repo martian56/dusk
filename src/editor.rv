@@ -5,7 +5,7 @@ from std.time import now_millis
 from std.env import current_dir
 from std.process import run_with_input
 from "github.com/martian56/perch/keys" import Key, MouseEvent
-from "./doc" import Doc, open_doc, clen, csub
+from "./doc" import Doc, open_doc, clen, csub, cell_col
 from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
 from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
 from "./theme" import (
@@ -3064,6 +3064,27 @@ impl Ed {
         self.insert_text(text)
     }
 
+    // Scroll the text `delta` cells sideways, as far as the longest visible
+    // line allows, and keep the cursor in view.
+    fun scroll_side(self, delta: int) {
+        let d = self.doc()
+        let tw = self.cfg.tab_width
+        var widest = 0
+        for r in range(d.top, min(len(d.lines), d.top + self.text_h)) {
+            widest = max(widest, cell_col(d.lines[r], d.lines[r].length(), tw))
+        }
+        d.left = max(0, min(d.left + delta, max(0, widest - self.text_w + 1)))
+        let cur = cell_col(d.lines[d.row], d.col, tw)
+        if cur < d.left or cur >= d.left + self.text_w {
+            let want = d.left if cur < d.left else d.left + self.text_w - 1
+            let (r, c) = self.cell_to_pos(
+                self.text_x + self.gutter_w + (want - d.left),
+                self.text_y + (d.row - d.top),
+            )
+            d.col = c
+        }
+    }
+
     fun cell_to_pos(self, x: int, y: int) -> (int, int) {
         let d = self.doc()
         let r = max(0, min(d.top + (y - self.text_y), len(d.lines) - 1))
@@ -3094,9 +3115,13 @@ impl Ed {
         let d = self.doc()
         let in_side = self.show_tree and x < self.side_w
         let in_text = x >= self.text_x and y >= self.text_y and y < self.text_y + self.text_h
+        // Shift with the wheel, or a sideways wheel, scrolls the text sideways.
+        let sideways = m.mods & 1 != 0 and in_text and self.mode != "picker" and self.mode != "help"
         match m.kind {
             case ScrollDown {
-                if self.mode == "picker" {
+                if sideways {
+                    self.scroll_side(6)
+                } else if self.mode == "picker" {
                     self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 3)
                 } else if self.mode == "help" {
                     self.help_top += 3
@@ -3111,7 +3136,9 @@ impl Ed {
                 }
             }
             case ScrollUp {
-                if self.mode == "picker" {
+                if sideways {
+                    self.scroll_side(0 - 6)
+                } else if self.mode == "picker" {
                     self.picker_sel = max(0, self.picker_sel - 3)
                 } else if self.mode == "help" {
                     self.help_top = max(0, self.help_top - 3)

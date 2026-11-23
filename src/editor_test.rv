@@ -62,3 +62,24 @@ fun test_leader_key_waits_for_the_next_key() {
     assert_true(run_keys("abc", "<space>q").quit)
     assert_false(run_keys("abc", "<space>").quit)
 }
+
+fun test_sideways_wheel_scrolls_long_lines() {
+    let long = "x" + " word" * 60
+    let ed = run_keys("short\n" + long + "\nend", "j")
+    for i in range(5) {
+        ed.handle_mouse(parse_script("<wheelright:10,3>")[0].mouse)
+    }
+    let d = ed.doc()
+    assert_eq_int(d.left, 30)
+    assert_true(d.col >= 30)
+    ed.handle_mouse(parse_script("<wheelleft:10,3>")[0].mouse)
+    assert_eq_int(d.left, 24)
+    for i in range(20) {
+        ed.handle_mouse(parse_script("<wheelleft:10,3>")[0].mouse)
+    }
+    assert_eq_int(d.left, 0)
+    for i in range(200) {
+        ed.handle_mouse(parse_script("<wheelright:10,3>")[0].mouse)
+    }
+    assert_eq_int(d.left, long.length() - ed.text_w + 1)
+}

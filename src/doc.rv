@@ -2,6 +2,7 @@
 // Positions are (row, col) with col counted in characters, not bytes.
 
 from std.fs import read, write, exists, modified
+from "github.com/martian56/wingspan" import width
 
 class Snap {
     lines: list[str]
@@ -240,4 +241,21 @@ impl Doc {
         }
         return out
     }
+}
+
+// The screen cell where character `col` of `line` starts, with tabs `tw` wide
+// and wide characters taking two cells.
+fun cell_col(line: str, col: int, tw: int) -> int {
+    let cs = line.chars()
+    var cell = 0
+    for c in range(min(col, len(cs))) {
+        if cs[c] == "\t" {
+            cell += tw - cell % tw
+        } else if cs[c].length() > 1 {
+            cell += max(1, width(cs[c]))
+        } else {
+            cell += 1
+        }
+    }
+    return cell
 }

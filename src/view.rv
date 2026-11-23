@@ -8,7 +8,7 @@ from "github.com/martian56/plumage/style" import Style
 from "github.com/martian56/wingspan" import width, truncate
 from "./ui" import layout
 from "./editor" import Ed, COMMANDS
-from "./doc" import Doc
+from "./doc" import Doc, cell_col
 from "./langs" import KIND_NAMES
 from "./highlight" import highlight_line, kinds_for
 
@@ -126,6 +126,33 @@ fun render(ed: Ed, f: Frame) {
     }
 }
 
+fun tab_label(ed: Ed, i: int) -> str {
+    let dd = ed.docs[i]
+    var name = dd.path.substring(dd.path.last_index_of("/") + 1, dd.path.length()) if dd.path != "" else "[new]"
+    if dd.dirty {
+        name += " " + ed.theme.g("tab.dirty")
+    }
+    return " ${name} "
+}
+
+// The first tab to draw so the active one fits in `room` cells: tabs scroll
+// as little as possible, keeping as many on the left as fit.
+fun first_tab(ed: Ed, room: int) -> int {
+    let widths = range(len(ed.docs)).map(
+        i => width(tab_label(ed, i)) + 1 + (2 if i == ed.cur else 0),
+    )
+    var first = 0
+    var used = 0
+    for i in range(ed.cur + 1) {
+        used += widths[i]
+    }
+    while first < ed.cur and used > room {
+        used -= widths[first]
+        first += 1
+    }
+    return first
+}
+
 fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
     let t = ed.theme
     fill_row(buf, 0, buf.w, 0, bar)
@@ -133,17 +160,16 @@ fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
     var x = 0
     let brand = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.bar")).bold()
     x = put(buf, x, 0, t.g("brand"), brand)
-    for i in range(len(ed.docs)) {
-        let dd = ed.docs[i]
-        var name = dd.path.substring(dd.path.last_index_of("/") + 1, dd.path.length()) if dd.path != "" else "[new]"
-        if dd.dirty {
-            name += " " + t.g("tab.dirty")
-        }
+    let more = Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")).bold()
+    let first = first_tab(ed, buf.w - x - 2)
+    if first > 0 {
+        x = put(buf, x, 0, "‹", more)
+    }
+    for i in range(first, len(ed.docs)) {
         let active = i == ed.cur
         let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.tab.active")).bold() if active else Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.bar"))
-        let label = " ${name} "
         let x0 = x
-        x = put(buf, x, 0, label, st)
+        x = put(buf, x, 0, tab_label(ed, i), st)
         if active {
             let cx = x
             x = put(
@@ -159,7 +185,10 @@ fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
             hits.push((x0, x, i))
         }
         x = put(buf, x, 0, t.g("tab.sep"), Style.new().fg(t.c("ui.border")).bg(t.c("ui.bar")))
-        if x >= buf.w {
+        if x >= buf.w - 1 {
+            if i + 1 < len(ed.docs) {
+                buf.set(buf.w - 1, 0, "›", more)
+            }
             break
         }
     }
@@ -261,7 +290,8 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
     let tw = ed.cfg.tab_width
     let kind_bits = KIND_NAMES.map(k => ed.theme.style(k))
     let text_left = x0 + gutter
-    let cols = max(1, buf.w - text_left)
+    // The text ends where a right-docked panel starts.
+    let cols = ed.text_w
     let cur_cells = cell_col(d.lines[d.row], d.col, tw)
     if cur_cells < d.left {
         d.left = cur_cells
@@ -396,21 +426,6 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
 }
 
 // The screen cell where character `col` of `line` starts.
-fun cell_col(line: str, col: int, tw: int) -> int {
-    let cs = line.chars()
-    var cell = 0
-    for c in range(min(col, len(cs))) {
-        if cs[c] == "\t" {
-            cell += tw - cell % tw
-        } else if cs[c].length() > 1 {
-            cell += max(1, width(cs[c]))
-        } else {
-            cell += 1
-        }
-    }
-    return cell
-}
-
 // Plugin panels: right-docked ones stacked beside the text, bottom ones side
 // by side under it. Records each panel's rectangle for the mouse.
 fun draw_docked(ed: Ed, buf: Buffer, right_w: int, body_h: int, bottom_y: int, bottom_h: int) {
@@ -500,15 +515,50 @@ fun draw_plugin_panel(ed: Ed, buf: Buffer, i: int, x: int, y: int, w: int, h: in
     }
 }
 
+// `s` cut to its last `n` characters behind an ellipsis, for paths whose
+// file name matters more than their directory.
+fun tail_fit(s: str, n: int) -> str {
+    let cs = s.chars()
+    if len(cs) <= n {
+        return s
+    }
+    if n <= 1 {
+        return "…" if n == 1 else ""
+    }
+    return "…" + "".join(cs.slice(len(cs) - (n - 1), len(cs)))
+}
+
 fun draw_status(ed: Ed, buf: Buffer, y: int) {
     let t = ed.theme
     let d = ed.doc()
     let bar = Style.new().fg(t.c("ui.bar.fg")).bg(t.c("ui.bar"))
     fill_row(buf, 0, buf.w, y, bar)
     let (label, color) = mode_label(ed)
+    let lname = ed.langs[d.lang].name if d.lang >= 0 else "text"
+    let pct = 100 * (d.row + 1) / len(d.lines)
+    var items = ""
+    for k in ed.plug.status.keys().sorted() {
+        let cs = ed.plug.status.get(k).unwrap().chars()
+        let item = "".join(cs.slice(0, 23)) + "…" if len(cs) > 24 else "".join(cs)
+        items += "${item}  "
+    }
+    let where = "${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
+    let counted = "${ed.count}" if ed.count > 0 else ""
+    let keys = "${counted}${ed.op} ${ed.pending}".trim()
+    let left_fixed = len(label.chars()) + 2 + (2 if d.dirty else 0) + (len(keys.chars()) + 2 if keys != "" else 0) + 2
+    // The cursor position always shows; plugin items go first when the
+    // path would get too short, then the path shrinks from the front.
+    var right = items + where
+    if buf.w - left_fixed - len(right.chars()) < 12 {
+        right = where
+    }
+    if buf.w - left_fixed - len(right.chars()) < 12 {
+        right = "${d.row + 1}:${d.col + 1} "
+    }
+    let room = max(0, buf.w - left_fixed - len(right.chars()))
     var x = put(buf, 0, y, " ${label} ", Style.new().fg(t.c("ui.bg")).bg(t.c(color)).bold())
     let name = d.path if d.path != "" else "[new]"
-    x = put(buf, x, y, " ${name}", bar.bold())
+    x = put(buf, x, y, " " + tail_fit(name, max(0, room - 1)), bar.bold())
     if d.dirty {
         x = put(
             buf,
@@ -518,20 +568,9 @@ fun draw_status(ed: Ed, buf: Buffer, y: int) {
             Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")),
         )
     }
-    if ed.pending != "" or ed.op != "" or ed.count > 0 {
-        let counted = "${ed.count}" if ed.count > 0 else ""
-        let keys = "${counted}${ed.op} ${ed.pending}".trim()
+    if keys != "" {
         x = put(buf, x + 2, y, keys, Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")))
     }
-    let lname = ed.langs[d.lang].name if d.lang >= 0 else "text"
-    let pct = 100 * (d.row + 1) / len(d.lines)
-    var items = ""
-    for k in ed.plug.status.keys().sorted() {
-        let cs = ed.plug.status.get(k).unwrap().chars()
-        let item = "".join(cs.slice(0, 23)) + "…" if len(cs) > 24 else "".join(cs)
-        items += "${item}  "
-    }
-    let right = "${items}${lname}  ${"CRLF" if d.crlf else "LF"}  Ln ${d.row + 1}/${len(d.lines)}, Col ${d.col + 1}  ${pct}% "
     let _ = put(buf, max(x + 1, buf.w - right.chars().len()), y, right, bar)
 }
 
@@ -778,12 +817,90 @@ fun help_lines(ed: Ed) -> list[str] {
     return out
 }
 
+// Where a wrapped continuation of `cs` should start: under the description of
+// a "  key    description" row (after the first run of two or more spaces that
+// follows text), otherwise under the line's own indentation.
+fun hang_of(cs: list[str]) -> int {
+    var i = 0
+    while i < len(cs) and cs[i] == " " {
+        i += 1
+    }
+    let lead = i
+    var seen_text = false
+    while i < len(cs) {
+        if cs[i] != " " {
+            seen_text = true
+            i += 1
+            continue
+        }
+        if seen_text and i + 1 < len(cs) and cs[i + 1] == " " {
+            var j = i
+            while j < len(cs) and cs[j] == " " {
+                j += 1
+            }
+            return j if j < len(cs) else lead
+        }
+        i += 1
+    }
+    return lead
+}
+
+// Break `line` into rows of at most `width` cells at spaces, continuing each
+// row with a hanging indent. A word longer than a row is split.
+fun wrap_line(line: str, width: int) -> list[str] {
+    let out: list[str] = []
+    let cs = line.chars()
+    if width <= 0 or len(cs) <= width {
+        out.push(line)
+        return out
+    }
+    var hang = hang_of(cs)
+    if hang > width / 2 {
+        hang = min(4, width / 4)
+    }
+    let pad = " " * hang
+    var start = 0
+    var first = true
+    while start < len(cs) {
+        let room = width if first else width - hang
+        if len(cs) - start <= room {
+            out.push((pad if not first else "") + "".join(cs.slice(start, len(cs))))
+            break
+        }
+        var cut = start + room
+        var k = cut
+        while k > start and cs[k] != " " {
+            k -= 1
+        }
+        if k > start {
+            cut = k
+        }
+        out.push((pad if not first else "") + "".join(cs.slice(start, cut)).trim_end())
+        start = cut
+        while start < len(cs) and cs[start] == " " {
+            start += 1
+        }
+        first = false
+    }
+    return out
+}
+
 fun draw_help(ed: Ed, buf: Buffer, h: int) {
     let t = ed.theme
     let w = min(buf.w - 2, 100)
     let x = (buf.w - w) / 2
     draw_box(ed, buf, x, 1, w, h, "Help  (j/k or wheel to scroll, Esc to close)")
-    let lines = help_lines(ed)
+    let lines: list[str] = []
+    let heads: list[bool] = []
+    let raw = help_lines(ed)
+    for k in range(len(raw)) {
+        let line = raw[k]
+        let is_head = k == 0 or (line != "" and not line.starts_with(" ") and line == line.to_upper())
+        for row in wrap_line(line, w - 4) {
+            lines.push(row)
+            heads.push(is_head)
+        }
+    }
     ed.help_top = min(ed.help_top, max(0, len(lines) - (h - 2)))
     let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.popup"))
     let head = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.popup")).bold()
@@ -792,8 +909,6 @@ fun draw_help(ed: Ed, buf: Buffer, h: int) {
         if k >= len(lines) {
             break
         }
-        let line = lines[k]
-        let is_head = line != "" and not line.starts_with(" ") and line == line.to_upper()
-        let _ = put(buf, x + 2, 2 + i, truncate(line, w - 4), head if is_head or k == 0 else st)
+        let _ = put(buf, x + 2, 2 + i, truncate(lines[k], w - 4), head if heads[k] else st)
     }
 }

@@ -1,0 +1,30 @@
+from std.test import assert_eq_str, assert_eq_int, assert_true
+from "./view" import wrap_line, tail_fit
+
+fun test_wrap_keeps_short_lines() {
+    let rows = wrap_line("short", 20)
+    assert_eq_int(len(rows), 1)
+    assert_eq_str(rows[0], "short")
+}
+
+fun test_wrap_hangs_under_the_description() {
+    let rows = wrap_line("  click        place the cursor or open a file", 30)
+    assert_eq_str(rows[0], "  click        place the")
+    assert_eq_str(rows[1], "               cursor or open")
+    assert_eq_str(rows[2], "               a file")
+    for r in rows {
+        assert_true(len(r.chars()) <= 30)
+    }
+}
+
+fun test_wrap_splits_a_long_word() {
+    let rows = wrap_line("x" * 25, 10)
+    assert_eq_int(len(rows), 3)
+    assert_eq_str(rows[0], "x" * 10)
+}
+
+fun test_tail_fit_keeps_the_file_name() {
+    assert_eq_str(tail_fit("src/deep/dir/file.rv", 10), "…r/file.rv")
+    assert_eq_str(tail_fit("a.rv", 10), "a.rv")
+    assert_eq_str(tail_fit("abc", 0), "")
+}
