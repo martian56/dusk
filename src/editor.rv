@@ -9,7 +9,7 @@ from "github.com/martian56/wingspan" import width
 from "./doc" import Doc, open_doc, clen, csub, cell_col, text_lines
 from "./langs" import Lang, builtin_langs, lang_for_path, lang_named, plain_lang
 from "./config" import Config, Plugin, load_config, config_path, config_dir, SAMPLE_CONFIG
-from "./diff" import line_changes, change_counts
+from "./diff" import line_changes, change_counts, hunks, hunk_at, unified
 from "./theme" import (
     Theme,
     make_theme,
@@ -1923,6 +1923,10 @@ impl Ed {
             self.jump_change(true)
         } else if name == "prev_change" {
             self.jump_change(false)
+        } else if name == "revert_change" {
+            self.revert_change()
+        } else if name == "show_diff" {
+            self.show_diff()
         } else if name == "clear_changes" {
             self.clear_base(self.doc().path)
             self.say("change highlights cleared")
@@ -2145,6 +2149,8 @@ impl Ed {
             self.show_plugin_log(arg.substring(3, arg.length()).trim())
         } else if head == "plugin" {
             self.plugin_admin(arg)
+        } else if head == "diff" {
+            self.show_diff()
         } else if head == "sort" {
             if not ranged {
                 r1 = 0
@@ -3341,6 +3347,8 @@ let COMMANDS = [
     ("next_change", "jump to the next change made outside dusk"),
     ("prev_change", "jump to the previous change made outside dusk"),
     ("clear_changes", "stop highlighting outside changes in this file"),
+    ("revert_change", "put the change under the cursor back as it was"),
+    ("show_diff", "open this file's outside changes as a diff"),
     ("next_theme", "cycle the color theme"),
     ("pick_theme", "choose a color theme"),
     ("pick_language", "set the file's language"),
@@ -4237,6 +4245,68 @@ impl Ed {
         }
         let none: list[int] = []
         return none
+    }
+
+    // Put the change under the cursor back the way the baseline had it, as
+    // one undo step.
+    fun revert_change(self) {
+        let d = self.doc()
+        let base = match self.plug.bases.get(d.path) {
+            case Some(b) { b }
+            case None {
+                self.say("no outside changes to revert in this file")
+                return
+            }
+        }
+        match hunk_at(hunks(base, d.lines), d.row) {
+            case Some(h) {
+                d.checkpoint()
+                let lines: list[str] = []
+                for r in range(h.new_start) {
+                    lines.push(d.lines[r])
+                }
+                for r in range(h.old_start, h.old_end) {
+                    lines.push(base[r])
+                }
+                for r in range(h.new_end, len(d.lines)) {
+                    lines.push(d.lines[r])
+                }
+                if len(lines) == 0 {
+                    lines.push("")
+                }
+                d.lines = lines
+                d.row = min(h.new_start, len(lines) - 1)
+                d.col = 0
+                d.clamp()
+                d.touched(h.new_start)
+                let gone = h.new_end - h.new_start
+                let back = h.old_end - h.old_start
+                self.say("reverted the change: ${gone} lines out, ${back} back in (u undoes)")
+            }
+            case None { self.say("the cursor is not on a change; ] c finds one") }
+        }
+    }
+
+    // Open the file's outside changes as a unified diff in a new buffer.
+    fun show_diff(self) {
+        let d = self.doc()
+        let base = match self.plug.bases.get(d.path) {
+            case Some(b) { b }
+            case None {
+                self.say("no outside changes in this file")
+                return
+            }
+        }
+        let lines = unified(base, d.lines, d.path if d.path != "" else "[new]", 3)
+        if len(lines) == 0 {
+            self.say("no line changes")
+            return
+        }
+        let out = open_doc("", -1)
+        out.lines = lines
+        self.docs.push(out)
+        self.cur = len(self.docs) - 1
+        self.say("changes in ${d.path}: ${len(lines) - 2} diff lines")
     }
 
     // Move to the start of the next (or previous) changed block.

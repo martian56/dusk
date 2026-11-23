@@ -1,5 +1,5 @@
 from std.test import assert_eq_str, assert_eq_int
-from "./diff" import line_changes, change_counts
+from "./diff" import line_changes, change_counts, hunks, unified
 
 fun shown(old: str, new: str) -> str {
     let ks = line_changes(old.split(","), new.split(","))
@@ -36,4 +36,33 @@ fun test_counts() {
     assert_eq_int(a, 1)
     assert_eq_int(c, 1)
     assert_eq_int(r, 0)
+}
+
+fun test_hunks_map_old_rows_to_new_rows() {
+    let hs = hunks("1,2,3,4,5".split(","), "1,X,3,5,6".split(","))
+    assert_eq_int(len(hs), 3)
+    assert_eq_int(hs[0].old_start, 1)
+    assert_eq_int(hs[0].old_end, 2)
+    assert_eq_int(hs[0].new_start, 1)
+    assert_eq_int(hs[0].new_end, 2)
+    assert_eq_int(hs[1].old_start, 3)
+    assert_eq_int(hs[1].old_end, 4)
+    assert_eq_int(hs[1].new_start, 3)
+    assert_eq_int(hs[1].new_end, 3)
+    assert_eq_int(hs[2].new_start, 4)
+    assert_eq_int(hs[2].new_end, 5)
+}
+
+fun test_unified_diff() {
+    let out = unified("a,b,c,d,e,f,g,h".split(","), "a,b,C,d,e,f,g,h,i".split(","), "x.txt", 1)
+    assert_eq_str(out[0], "--- a/x.txt")
+    assert_eq_str(out[1], "+++ b/x.txt")
+    assert_eq_str(out[2], "@@ -2,3 +2,3 @@")
+    assert_eq_str(out[3], " b")
+    assert_eq_str(out[4], "-c")
+    assert_eq_str(out[5], "+C")
+    assert_eq_str(out[6], " d")
+    assert_eq_str(out[7], "@@ -8,1 +8,2 @@")
+    assert_eq_str(out[9], "+i")
+    assert_eq_int(len(unified("a".split(","), "a".split(","), "x", 3)), 0)
 }
