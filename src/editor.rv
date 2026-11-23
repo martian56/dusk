@@ -14,7 +14,7 @@ from "./theme" import (
     theme_names,
     has_theme,
     theme_description,
-    define_theme,
+    add_theme,
     load_theme_dir,
 )
 from "./keys" import key_name, default_keys, normalize_binding
@@ -3649,12 +3649,12 @@ impl Ed {
                 }
             }
             case SetTheme(p, name) { self.set_theme(name) }
-            case DefineTheme(p, name, base, description, colors) {
-                let err = define_theme(name, base, description, colors)
+            case DefineTheme(p, spec) {
+                let err = add_theme(spec)
                 if err != "" {
                     self.fail("${p}: ${err}")
-                } else if self.theme.name == name.trim() {
-                    self.set_theme(name.trim())
+                } else if self.theme.name == spec.name.trim() {
+                    self.set_theme(spec.name.trim())
                 }
             }
             case ListThemes(p, id) {

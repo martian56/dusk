@@ -219,13 +219,24 @@ open waits until dusk is back in normal mode.
 
 ### theme/define (notification from a plugin)
 
-Adds a theme, or replaces one the plugin defined before. Colors not listed
-come from `base`, a built-in theme (`dusk` when absent). Every color must be
-`#rrggbb`; a bad one rejects the whole theme and dusk says why. Redefining
-the current theme repaints it.
+Adds a theme, or replaces one defined before. Everything not listed comes
+from `base`, a built-in theme (`dusk` when absent). `colors`, `styles`,
+`glyphs`, and `labels` are optional objects with the same names and rules as
+the sections of a theme file (see the README): colors are `#rrggbb`, styles
+are words from bold, italic, underline, dim, and none, glyphs are one
+character (`brand` up to 16), and labels up to 12. A bad entry rejects the
+whole theme and dusk says why. Redefining the current theme repaints it.
 
 ```json
-{"name": "synthwave", "base": "dusk", "description": "Neon over a purple night", "colors": {"ui.bg": "#241b2f", "keyword": "#fede5d"}}
+{
+  "name": "synthwave",
+  "base": "dusk",
+  "description": "Neon over a purple night",
+  "colors": {"ui.bg": "#241b2f", "keyword": "#fede5d"},
+  "styles": {"keyword": "bold italic"},
+  "glyphs": {"brand": " SYNTH "},
+  "labels": {"insert": "DRIVE"}
+}
 ```
 
 ### theme/set (notification from a plugin)

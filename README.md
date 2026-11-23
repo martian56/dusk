@@ -89,10 +89,26 @@ base = "nord"            # optional; colors not listed come from it
 [colors]
 "ui.bg" = "#1b2330"
 keyword = "#e0a458"
+
+[styles]                 # bold, italic, underline, dim, or none
+keyword = "bold"
+comment = "italic dim"
+
+[glyphs]
+brand = " ~harbor~ "     # up to 16 characters
+"tree.open" = "-"        # the others are one character each
+
+[labels]                 # the mode names in the status bar
+normal = "DRIFT"
+insert = "ROW"
 ```
 
 Color names are the syntax kinds (`keyword`, `string`, `comment`, ...) and the
 interface names under `ui.` (`ui.bg`, `ui.cursor`, `ui.mode.insert`, ...).
+Glyphs are `brand`, `tab.dirty`, `tab.close`, `tab.sep`, `tree.open`,
+`tree.closed`, `indent`, `border.v`, `border.h`, `corner.tl`, `corner.tr`,
+`corner.bl`, `corner.br`, and `status.dirty`. Labels are `normal`, `insert`,
+`visual`, `vline`, `command`, `files`, and `panel`. Every section is optional.
 Plugins add themes too: an installed plugin whose `dusk-plugin.toml` sets
 `themes = "themes"` contributes every file in that directory, and a running
 plugin can define and switch themes over the protocol. For a large set, try

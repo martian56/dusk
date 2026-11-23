@@ -51,24 +51,24 @@ fun ensure_hl(ed: Ed, d: Doc, upto: int) {
 fun mode_label(ed: Ed) -> (str, str) {
     let m = ed.mode
     if m == "insert" {
-        return ("INSERT", "ui.mode.insert")
+        return (ed.theme.label("insert"), "ui.mode.insert")
     }
     if m == "visual" {
-        return ("VISUAL", "ui.mode.visual")
+        return (ed.theme.label("visual"), "ui.mode.visual")
     }
     if m == "vline" {
-        return ("V-LINE", "ui.mode.visual")
+        return (ed.theme.label("vline"), "ui.mode.visual")
     }
     if m == "prompt" or m == "picker" {
-        return ("COMMAND", "ui.mode.command")
+        return (ed.theme.label("command"), "ui.mode.command")
     }
     if m == "tree" {
-        return ("FILES", "ui.mode.command")
+        return (ed.theme.label("files"), "ui.mode.command")
     }
     if m == "panel" {
-        return ("PANEL", "ui.mode.command")
+        return (ed.theme.label("panel"), "ui.mode.command")
     }
-    return ("NORMAL", "ui.mode.normal")
+    return (ed.theme.label("normal"), "ui.mode.normal")
 }
 
 fun render(ed: Ed, f: Frame) {
@@ -132,12 +132,12 @@ fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
     let hits: list[(int, int, int)] = []
     var x = 0
     let brand = Style.new().fg(t.c("ui.mode.normal")).bg(t.c("ui.bar")).bold()
-    x = put(buf, x, 0, " dusk ", brand)
+    x = put(buf, x, 0, t.g("brand"), brand)
     for i in range(len(ed.docs)) {
         let dd = ed.docs[i]
         var name = dd.path.substring(dd.path.last_index_of("/") + 1, dd.path.length()) if dd.path != "" else "[new]"
         if dd.dirty {
-            name += " ●"
+            name += " " + t.g("tab.dirty")
         }
         let active = i == ed.cur
         let st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.tab.active")).bold() if active else Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.bar"))
@@ -146,13 +146,19 @@ fun draw_tabs(ed: Ed, buf: Buffer, bar: Style) {
         x = put(buf, x, 0, label, st)
         if active {
             let cx = x
-            x = put(buf, x, 0, "× ", Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.tab.active")))
+            x = put(
+                buf,
+                x,
+                0,
+                t.g("tab.close") + " ",
+                Style.new().fg(t.c("ui.gutter")).bg(t.c("ui.tab.active")),
+            )
             hits.push((x0, cx, i))
             hits.push((cx, x, -1))
         } else {
             hits.push((x0, x, i))
         }
-        x = put(buf, x, 0, "│", Style.new().fg(t.c("ui.border")).bg(t.c("ui.bar")))
+        x = put(buf, x, 0, t.g("tab.sep"), Style.new().fg(t.c("ui.border")).bg(t.c("ui.bar")))
         if x >= buf.w {
             break
         }
@@ -165,7 +171,7 @@ fun draw_tree(ed: Ed, buf: Buffer, w: int, h: int) {
     let base = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.sidebar"))
     for y in range(1, 1 + h) {
         fill_row(buf, 0, w - 1, y, base)
-        buf.set(w - 1, y, "│", Style.new().fg(t.c("ui.border")).bg(t.c("ui.bg")))
+        buf.set(w - 1, y, t.g("border.v"), Style.new().fg(t.c("ui.border")).bg(t.c("ui.bg")))
     }
     if ed.tree_sel < ed.tree_top {
         ed.tree_top = ed.tree_sel
@@ -188,7 +194,7 @@ fun draw_tree(ed: Ed, buf: Buffer, w: int, h: int) {
             st = Style.new().fg(t.c("ui.fg")).bg(t.c("ui.cursorline")).bold()
         }
         fill_row(buf, 0, w - 1, y, st)
-        let icon = ("▾ " if it.open else "▸ ") if it.dir else "  "
+        let icon = ((t.g("tree.open") if it.open else t.g("tree.closed")) + " ") if it.dir else "  "
         let fg = Style.new().fg(t.c("ui.dir") if it.dir else t.c("ui.fg")).bg(st.bg)
         let text = truncate(" " + "  " * it.depth + icon + it.name, w - 2)
         let _ = put(buf, 0, y, text, fg if not (ed.mode == "tree" and k == ed.tree_sel) else st)
@@ -253,6 +259,7 @@ fun search_marks(ed: Ed, line: str) -> list[bool] {
 fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
     let t = ed.theme
     let tw = ed.cfg.tab_width
+    let kind_bits = KIND_NAMES.map(k => ed.theme.style(k))
     let text_left = x0 + gutter
     let cols = max(1, buf.w - text_left)
     let cur_cells = cell_col(d.lines[d.row], d.col, tw)
@@ -351,17 +358,24 @@ fun draw_text(ed: Ed, buf: Buffer, d: Doc, x0: int, gutter: int, h: int) {
                 fg = t.c("ui.bg")
             }
             var st = Style.new().fg(fg).bg(cbg)
-            if bold or (not at_end and kinds[c] == 1) {
+            let bits = 0 if at_end else kind_bits[kinds[c]]
+            if bold or bits & 1 != 0 {
                 st = st.bold()
             }
-            if not at_end and kinds[c] == 6 {
+            if bits & 2 != 0 {
                 st = st.italic()
+            }
+            if bits & 4 != 0 {
+                st = st.underline()
+            }
+            if bits & 8 != 0 {
+                st = st.dim()
             }
             var glyph = ch
             if ch == "\t" {
                 glyph = " "
             } else if leading and ch == " " and cell > tw and (cell - 1) % tw == 0 and not is_cursor {
-                glyph = "┊"
+                glyph = t.g("indent")
                 st = Style.new().fg(t.c("ui.border")).bg(cbg)
             }
             if at_end and not is_cursor and cbg == row_bg {
@@ -447,7 +461,7 @@ fun draw_plugin_panel(ed: Ed, buf: Buffer, i: int, x: int, y: int, w: int, h: in
         t.c("ui.bg"),
     )
     for yy in range(y + 1, y + h) {
-        buf.set(x, yy, "│", border)
+        buf.set(x, yy, t.g("border.v"), border)
     }
     let cw = w - 2
     let rows = layout(p, cw, h - 1, now_millis() / 100)
@@ -496,7 +510,13 @@ fun draw_status(ed: Ed, buf: Buffer, y: int) {
     let name = d.path if d.path != "" else "[new]"
     x = put(buf, x, y, " ${name}", bar.bold())
     if d.dirty {
-        x = put(buf, x, y, " ●", Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")))
+        x = put(
+            buf,
+            x,
+            y,
+            " " + t.g("status.dirty"),
+            Style.new().fg(t.c("ui.mode.command")).bg(t.c("ui.bar")),
+        )
     }
     if ed.pending != "" or ed.op != "" or ed.count > 0 {
         let counted = "${ed.count}" if ed.count > 0 else ""
@@ -570,17 +590,17 @@ fun draw_box(ed: Ed, buf: Buffer, x: int, y: int, w: int, h: int, title: str) {
         fill_row(buf, x, x + w, yy, st)
     }
     for xx in range(x, x + w) {
-        buf.set(xx, y, "─", border)
-        buf.set(xx, y + h - 1, "─", border)
+        buf.set(xx, y, t.g("border.h"), border)
+        buf.set(xx, y + h - 1, t.g("border.h"), border)
     }
     for yy in range(y, y + h) {
-        buf.set(x, yy, "│", border)
-        buf.set(x + w - 1, yy, "│", border)
+        buf.set(x, yy, t.g("border.v"), border)
+        buf.set(x + w - 1, yy, t.g("border.v"), border)
     }
-    buf.set(x, y, "╭", border)
-    buf.set(x + w - 1, y, "╮", border)
-    buf.set(x, y + h - 1, "╰", border)
-    buf.set(x + w - 1, y + h - 1, "╯", border)
+    buf.set(x, y, t.g("corner.tl"), border)
+    buf.set(x + w - 1, y, t.g("corner.tr"), border)
+    buf.set(x, y + h - 1, t.g("corner.bl"), border)
+    buf.set(x + w - 1, y + h - 1, t.g("corner.br"), border)
     let _ = put(
         buf,
         x + 2,

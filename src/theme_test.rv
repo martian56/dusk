@@ -4,6 +4,12 @@ from "github.com/martian56/plumage/style" import Color
 from "github.com/martian56/raven-toml" import parse
 from "./config" import Config, apply
 from "./theme" import (
+    add_theme,
+    extra_theme,
+    BOLD,
+    ITALIC,
+    UNDERLINE,
+    DIM,
     make_theme,
     theme_names,
     has_theme,
@@ -74,4 +80,54 @@ fun test_config_overrides_dotted_ui_colors() {
     let (k, v) = cfg.colors[0]
     assert_eq_str(k, "ui.bg")
     assert_eq_str(v, "#123456")
+}
+
+fun test_styles_glyphs_and_labels_apply() {
+    let spec = extra_theme("t-fancy")
+    spec.styles = [("keyword", "underline"), ("string", "bold italic"), ("comment", "none")]
+    spec.glyphs = [("brand", " ~fancy~ "), ("tree.open", "-")]
+    spec.labels = [("normal", "CHILL")]
+    assert_eq_str(add_theme(spec), "")
+    let t = make_theme("t-fancy")
+    assert_eq_int(t.style("keyword"), UNDERLINE)
+    assert_eq_int(t.style("string"), BOLD | ITALIC)
+    assert_eq_int(t.style("comment"), 0)
+    assert_eq_str(t.g("brand"), " ~fancy~ ")
+    assert_eq_str(t.g("tree.open"), "-")
+    assert_eq_str(t.g("tree.closed"), "▸")
+    assert_eq_str(t.label("normal"), "CHILL")
+    assert_eq_str(t.label("insert"), "INSERT")
+    let plain = make_theme("dusk")
+    assert_eq_int(plain.style("keyword"), BOLD)
+    assert_eq_int(plain.style("comment"), ITALIC)
+}
+
+fun test_bad_extras_are_refused() {
+    let bad_style = extra_theme("t-x1")
+    bad_style.styles = [("keyword", "sparkly")]
+    assert_true(add_theme(bad_style).contains("style"))
+    let wide = extra_theme("t-x2")
+    wide.glyphs = [("tab.sep", "||")]
+    assert_true(add_theme(wide).contains("glyph"))
+    let unknown = extra_theme("t-x3")
+    unknown.glyphs = [("sparkle", "*")]
+    assert_true(add_theme(unknown).contains("no glyph"))
+    let long_label = extra_theme("t-x4")
+    long_label.labels = [("normal", "SUPERCALIFRAGILISTIC")]
+    assert_true(add_theme(long_label).contains("label"))
+    assert_false(has_theme("t-x1") or has_theme("t-x2") or has_theme("t-x3") or has_theme("t-x4"))
+}
+
+fun test_theme_file_reads_every_section() {
+    let dir = "target/theme-test-2"
+    let _ = create_dir_all(dir)
+    let _ = write(
+        "${dir}/f.toml",
+        "name = \"t-sections\"\n[styles]\nkeyword = \"italic\"\n[glyphs]\n\"tab.dirty\" = \"*\"\n[labels]\ninsert = \"TYPE\"\n",
+    )
+    assert_eq_int(len(load_theme_dir(dir)), 0)
+    let t = make_theme("t-sections")
+    assert_eq_int(t.style("keyword"), ITALIC)
+    assert_eq_str(t.g("tab.dirty"), "*")
+    assert_eq_str(t.label("insert"), "TYPE")
 }

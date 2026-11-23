@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-11-24
 
-- Theme files: every `~/.config/dusk/themes/*.toml` adds a theme with a name, a description, an optional built-in base, and a `[colors]` table.
+- Theme files: every `~/.config/dusk/themes/*.toml` adds a theme with a name, a description, an optional built-in base, and optional `[colors]`, `[styles]` (bold, italic, underline, dim per syntax kind), `[glyphs]` (brand, tab and tree markers, borders, corners, indent guide), and `[labels]` (mode names) tables.
 - Plugins add themes: a `dusk-plugin.toml` with `themes = "themes"` contributes a directory of theme files and needs no command, and running plugins can `theme/define`, `theme/set`, and `theme/list`.
 - `:theme <name>` with an unknown name says so instead of falling back to dusk.
 - Fixed: `[theme]` overrides of `ui.*` colors, such as `"ui.bg"`, were ignored.

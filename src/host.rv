@@ -2,6 +2,7 @@
 // The host turns its messages into HostAction values for the editor to
 // apply, and never blocks: everything happens in poll().
 
+from "./theme" import ExtraTheme, extra_theme
 from std.json import JsonValue
 from std.process import Child, start
 from std.time import now_millis
@@ -78,7 +79,7 @@ enum HostAction {
     Marks(str, str, list[Mark]),
     FilesChanged(str, list[str]),
     SetTheme(str, str),
-    DefineTheme(str, str, str, str, list[(str, str)]),
+    DefineTheme(str, ExtraTheme),
     ListThemes(str, int),
 }
 
@@ -194,15 +195,15 @@ fun action_text(a: HostAction) -> str {
         case Marks(p, path, ms) { "marks:${path}:${len(ms)}" }
         case FilesChanged(p, paths) { "changed:${",".join(paths)}" }
         case SetTheme(p, name) { "theme:${name}" }
-        case DefineTheme(p, name, base, d, cs) { "define-theme:${name}:${len(cs)}" }
+        case DefineTheme(p, spec) { "define-theme:${spec.name}:${len(spec.colors)}" }
         case ListThemes(p, id) { "list-themes" }
     }
 }
 
-// The `colors` object of a theme/define, as (name, "#rrggbb") pairs.
-fun colors_of(v: JsonValue) -> list[(str, str)] {
+// A theme/define table such as `colors`, as (name, value) pairs.
+fun pairs_of(v: JsonValue, key: str) -> list[(str, str)] {
     let out: list[(str, str)] = []
-    match v.get("colors") {
+    match v.get(key) {
         case Some(c) {
             match c {
                 case Object(m) {
@@ -620,15 +621,14 @@ impl PluginProc {
             } else if m.method == "theme/set" {
                 out.push(HostAction.SetTheme(me, get_str(params, "name")))
             } else if m.method == "theme/define" {
-                out.push(
-                    HostAction.DefineTheme(
-                        me,
-                        get_str(params, "name"),
-                        get_str(params, "base"),
-                        get_str(params, "description"),
-                        colors_of(params),
-                    ),
-                )
+                let spec = extra_theme(get_str(params, "name"))
+                spec.base = get_str(params, "base")
+                spec.description = get_str(params, "description")
+                spec.colors = pairs_of(params, "colors")
+                spec.styles = pairs_of(params, "styles")
+                spec.glyphs = pairs_of(params, "glyphs")
+                spec.labels = pairs_of(params, "labels")
+                out.push(HostAction.DefineTheme(me, spec))
             } else if m.method == "marks/set" {
                 out.push(HostAction.Marks(me, get_str(params, "path").replace("\\", "/"), marks_of(params)))
             } else {

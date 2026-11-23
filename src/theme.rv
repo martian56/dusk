@@ -12,22 +12,151 @@
 //     [colors]
 //     "ui.bg" = "#241b2f"
 //     keyword = "#fede5d"
+//
+//     [styles]                      # syntax kinds: bold, italic, underline, dim
+//     keyword = "bold"
+//     comment = "italic dim"
+//
+//     [glyphs]                      # one cell each, except brand
+//     brand = " ~dusk~ "
+//     "tree.open" = "-"
+//
+//     [labels]                      # mode names in the status bar
+//     normal = "CHILL"
 
 from std.fs import read, list_dir, is_dir
 from "github.com/martian56/plumage/style" import Color
-from "github.com/martian56/raven-toml" import parse
+from "github.com/martian56/raven-toml" import parse, Toml
 
 class Theme {
     name: str
     colors: dict[str, Color]
+    glyphs: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    styles: dict[str, int] = {}
 }
 
-// A theme added by a file or a plugin: its own colors over `base`.
+// A theme added by a file or a plugin: its own colors, styles, glyphs and
+// labels over `base`.
 class ExtraTheme {
     name: str
     base: str
     description: str
     colors: list[(str, str)]
+    styles: list[(str, str)] = []
+    glyphs: list[(str, str)] = []
+    labels: list[(str, str)] = []
+}
+
+// An empty extra theme over dusk, to fill in field by field.
+fun extra_theme(name: str) -> ExtraTheme = ExtraTheme(
+    name: name,
+    base: "dusk",
+    description: "",
+    colors: [],
+)
+
+// Style bits for syntax kinds.
+let BOLD = 1
+let ITALIC = 2
+let UNDERLINE = 4
+let DIM = 8
+
+// The glyphs a theme may replace, with dusk's own.
+let GLYPHS = [
+    ("brand", " dusk "),
+    ("tab.dirty", "●"),
+    ("tab.close", "×"),
+    ("tab.sep", "│"),
+    ("tree.open", "▾"),
+    ("tree.closed", "▸"),
+    ("indent", "┊"),
+    ("border.v", "│"),
+    ("border.h", "─"),
+    ("corner.tl", "╭"),
+    ("corner.tr", "╮"),
+    ("corner.bl", "╰"),
+    ("corner.br", "╯"),
+    ("status.dirty", "●"),
+]
+
+// The status bar's mode names a theme may replace.
+let LABELS = [
+    ("normal", "NORMAL"),
+    ("insert", "INSERT"),
+    ("visual", "VISUAL"),
+    ("vline", "V-LINE"),
+    ("command", "COMMAND"),
+    ("files", "FILES"),
+    ("panel", "PANEL"),
+]
+
+// The bits for a style such as "bold italic", or -1 for an unknown word.
+fun style_bits(s: str) -> int {
+    var bits = 0
+    for w in s.split(" ") {
+        let x = w.trim().to_lower()
+        if x == "bold" {
+            bits = bits | BOLD
+        } else if x == "italic" {
+            bits = bits | ITALIC
+        } else if x == "underline" {
+            bits = bits | UNDERLINE
+        } else if x == "dim" {
+            bits = bits | DIM
+        } else if x != "" and x != "none" and x != "plain" {
+            return 0 - 1
+        }
+    }
+    return bits
+}
+
+fun known(table: list[(str, str)], key: str) -> bool {
+    for (k, v) in table {
+        if k == key {
+            return true
+        }
+    }
+    return false
+}
+
+// Why a theme's styles, glyphs or labels are invalid, empty when they are fine.
+fun check_extras(n: str, t: ExtraTheme) -> str {
+    for (k, v) in t.styles {
+        if style_bits(v) < 0 {
+            return "theme ${n}: style ${k} must be bold, italic, underline, dim, or none"
+        }
+    }
+    for (k, v) in t.glyphs {
+        if not known(GLYPHS, k) {
+            return "theme ${n}: no glyph named ${k}"
+        }
+        let limit = 16 if k == "brand" else 1
+        let n_chars = len(v.chars())
+        if n_chars == 0 or n_chars > limit {
+            return "theme ${n}: glyph ${k} must be 1 to ${limit} characters"
+        }
+    }
+    for (k, v) in t.labels {
+        if not known(LABELS, k) {
+            return "theme ${n}: no mode named ${k}"
+        }
+        let n_chars = len(v.chars())
+        if n_chars == 0 or n_chars > 12 {
+            return "theme ${n}: label ${k} must be 1 to 12 characters"
+        }
+    }
+    return ""
+}
+
+// The default of `key` in `table`, or `fallback`.
+fun default_of(table: list[(str, str)], key: str, fallback: str) -> str {
+    for (k, v) in table {
+        if k == key {
+            return v
+        }
+    }
+    return fallback
 }
 
 let BUILTIN = ["dusk", "dawn", "gruvbox", "nord"]
@@ -87,7 +216,14 @@ fun theme_description(name: str) -> str {
 
 // Add or replace a theme. Returns an error message, empty on success.
 fun define_theme(name: str, base: str, description: str, colors: list[(str, str)]) -> str {
-    let n = name.trim()
+    return add_theme(ExtraTheme(name: name, base: base, description: description, colors: colors))
+}
+
+fun add_theme(spec: ExtraTheme) -> str {
+    let base = spec.base
+    let description = spec.description
+    let colors = spec.colors
+    let n = spec.name.trim()
     if n == "" {
         return "a theme needs a name"
     }
@@ -102,11 +238,18 @@ fun define_theme(name: str, base: str, description: str, colors: list[(str, str)
             }
         }
     }
+    let extras = check_extras(n, spec)
+    if extras != "" {
+        return extras
+    }
     let t = ExtraTheme(
         name: n,
         base: base if BUILTIN.contains(base) else "dusk",
         description: description,
         colors: colors,
+        styles: spec.styles,
+        glyphs: spec.glyphs,
+        labels: spec.labels,
     )
     for i in range(len(EXTRAS)) {
         if EXTRAS[i].name == n {
@@ -132,17 +275,27 @@ fun load_theme_file(path: str) -> str {
             return "${path}: ${e.to_string()}"
         }
     }
-    let colors: list[(str, str)] = []
-    for k in t.keys_under("colors") {
-        colors.push((k, t.get_string_or("colors.${k}", "")))
-    }
-    let err = define_theme(
-        t.get_string_or("name", ""),
-        t.get_string_or("base", "dusk"),
-        t.get_string_or("description", ""),
-        colors,
+    let err = add_theme(
+        ExtraTheme(
+            name: t.get_string_or("name", ""),
+            base: t.get_string_or("base", "dusk"),
+            description: t.get_string_or("description", ""),
+            colors: section(t, "colors"),
+            styles: section(t, "styles"),
+            glyphs: section(t, "glyphs"),
+            labels: section(t, "labels"),
+        ),
     )
     return "${path}: ${err}" if err != "" else ""
+}
+
+// The string entries of a theme file's table, as (key, value).
+fun section(t: Toml, name: str) -> list[(str, str)] {
+    let out: list[(str, str)] = []
+    for k in t.keys_under(name) {
+        out.push((k, t.get_string_or("${name}.${k}", "")))
+    }
+    return out
 }
 
 // Load every *.toml theme in `dir`, in name order. Returns the errors.
@@ -175,6 +328,15 @@ fun make_theme(name: str) -> Theme {
             base.name = t.name
             for (k, v) in t.colors {
                 let _ = base.set(k, v)
+            }
+            for (k, v) in t.styles {
+                base.styles.set(k, style_bits(v))
+            }
+            for (k, v) in t.glyphs {
+                base.glyphs.set(k, v)
+            }
+            for (k, v) in t.labels {
+                base.labels.set(k, v)
             }
             return base
         }
@@ -364,6 +526,29 @@ fun builtin_theme(name: str) -> Theme {
 }
 
 impl Theme {
+    // A glyph by name (see GLYPHS).
+    fun g(self, name: str) -> str = self.glyphs.get(name).unwrap_or(default_of(GLYPHS, name, "?"))
+
+    // The status bar name of a mode (see LABELS).
+    fun label(self, mode: str) -> str = self.labels.get(mode).unwrap_or(
+        default_of(LABELS, mode, mode.to_upper()),
+    )
+
+    // The style bits of a syntax kind: keywords bold and comments italic unless
+    // the theme says otherwise.
+    fun style(self, kind: str) -> int {
+        match self.styles.get(kind) {
+            case Some(b) {
+                return b
+            }
+            case None {}
+        }
+        if kind == "keyword" {
+            return BOLD
+        }
+        return ITALIC if kind == "comment" else 0
+    }
+
     fun c(self, name: str) -> Color {
         return self.colors.get(name).unwrap_or(Color.Default)
     }

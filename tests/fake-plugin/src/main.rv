@@ -277,6 +277,8 @@ fun handle(st: State, line: str) -> bool {
                         ("base", s("nord")),
                         ("description", s("test")),
                         ("colors", colors),
+                        ("glyphs", obj([("brand", s(" neon "))])),
+                        ("labels", obj([("normal", s("GLOW"))])),
                     ],
                 ),
             )
