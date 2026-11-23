@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 - 2026-11-24
+
+- `g r` puts the outside change under the cursor back as it was, in one undo step, so part of an edit (rook's, say) can be rejected and the rest kept.
+- `:diff` opens a file's outside changes as a unified diff.
+
 ## 0.6.0 - 2026-11-24
 
 - Changes made outside dusk are highlighted: after a reload, added and changed lines get a gutter bar and a tinted background, and removed lines a mark. `] c` and `[ c` jump between changes, and `:clear_changes` drops them. Plugins set what to compare against with `changes/baseline`, so rook shows exactly what it edited. Themes color them with `ui.diff.add`, `ui.diff.change`, and `ui.diff.delete`.
