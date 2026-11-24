@@ -830,8 +830,12 @@ fun help_lines(ed: Ed) -> list[str] {
     }
     out.push("")
     out.push("THEMES")
-    out.push("  :theme previews each theme as you move; Enter keeps it, Esc goes back. Theme files in")
-    out.push("  ~/.config/dusk/themes set colors, bold and italic, glyphs, and mode names. For twenty more:")
+    out.push(
+        "  :theme previews each theme as you move; Enter keeps it, Esc goes back. Theme files in",
+    )
+    out.push(
+        "  ~/.config/dusk/themes set colors, bold and italic, glyphs, and mode names. For twenty more:",
+    )
     out.push("  :plugin install github.com/martian56/dusk-theme")
     out.push("")
     out.push("PLUGINS AND CONFIG")
