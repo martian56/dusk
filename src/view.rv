@@ -98,7 +98,9 @@ fun render(ed: Ed, f: Frame) {
     let digits = "${len(d.lines)}".length()
     var gutter = 0 if ed.cfg.numbers == "off" else max(3, digits) + 2
     // A column for plugin marks, so a sign never covers a line number.
-    if ed.has_marks(d.path) {
+    // A column for plugin marks and change bars, so neither covers a line
+    // number.
+    if ed.has_marks(d.path) or ed.plug.bases.has(d.path) {
         gutter += 2 if gutter == 0 else 1
     }
     ed.side_w = side_w
@@ -228,7 +230,9 @@ fun draw_tree(ed: Ed, buf: Buffer, w: int, h: int) {
         fill_row(buf, 0, w - 1, y, st)
         let icon = ((t.g("tree.open") if it.open else t.g("tree.closed")) + " ") if it.dir else "  "
         let fg = Style.new().fg(t.c("ui.dir") if it.dir else t.c("ui.fg")).bg(st.bg)
-        let text = truncate(" " + "  " * it.depth + icon + it.name, w - 2)
+        let full = " " + "  " * it.depth + icon + it.name
+        // A name that does not fit ends in an ellipsis, so it reads as cut.
+        let text = full if width(full) <= w - 2 else truncate(full, w - 3) + "…"
         let _ = put(buf, 0, y, text, fg if not (ed.mode == "tree" and k == ed.tree_sel) else st)
     }
 }
