@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 - 2026-11-24
+
+- The theme picker previews each theme as you move through it; Enter keeps it and Esc puts back the one from before.
+- Change bars get their own gutter column instead of covering the hundreds digit of a line number.
+- A name too long for the file tree ends in an ellipsis.
+
 ## 0.7.0 - 2026-11-24
 
 - `g r` puts the outside change under the cursor back as it was, in one undo step, so part of an edit (rook's, say) can be rejected and the rest kept.
