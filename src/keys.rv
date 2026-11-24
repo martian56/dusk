@@ -105,6 +105,8 @@ fun default_keys() -> dict[str, dict[str, str]] {
             ("ctrl+end", "file_end"),
             ("alt+up", "move_line_up"),
             ("alt+down", "move_line_down"),
+            ("alt+k", "move_line_up"),
+            ("alt+j", "move_line_down"),
             ("ctrl+delete", "delete_word_after"),
         ],
     )

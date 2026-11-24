@@ -1,6 +1,7 @@
 from std.test import assert_eq_str, assert_eq_int, assert_true, assert_false
 from "./editor" import Ed, new_editor
 from "./keys" import parse_script
+from "github.com/martian56/perch/keys" import Key
 
 fun run_keys(text: str, keys: str) -> Ed {
     let ed = new_editor([])
@@ -135,4 +136,16 @@ fun test_theme_picker_previews_and_restores() {
     }
     assert_eq_str(ed.theme.name, third)
     assert_eq_str(ed.mode, "normal")
+}
+
+fun test_alt_letters_bind_or_act_as_escape_and_key() {
+    // Bound: Alt+J moves the line down.
+    let ed = run_keys("a\nb", "")
+    ed.handle_key(Key.Mod("alt+j"))
+    assert_eq_str(text(ed), "b|a")
+    // Unbound in insert mode: Esc, then the key in normal mode (x deletes).
+    let ed2 = run_keys("abc", "i")
+    ed2.handle_key(Key.Mod("alt+x"))
+    assert_eq_str(ed2.mode, "normal")
+    assert_eq_str(text(ed2), "bc")
 }

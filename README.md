@@ -73,7 +73,10 @@ keyword = "#ff79c6"
 "j k" = "normal_mode"
 ```
 
-Any command from the palette (`Ctrl+K`) can be bound in any mode.
+Any command from the palette (`Ctrl+K`) can be bound in any mode, including
+Alt combinations such as `"alt+s"`. `Alt+J` and `Alt+K` move the current line.
+An Alt key nobody bound acts as Esc and then the key, the way a quick Esc
+reads in a terminal.
 
 ## Themes
 

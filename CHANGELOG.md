@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.2 - 2026-11-24
+
+- Alt with a letter can be bound (perch 0.5.0 reports it): `Alt+J` and `Alt+K` move the current line, and an unbound Alt key acts as Esc and then the key.
+- Built on plumage 0.5.4, perch 0.5.0, and magpie 0.5.2.
+
 ## 0.7.1 - 2026-11-24
 
 - The theme picker previews each theme as you move through it; Enter keeps it and Esc puts back the one from before.

@@ -2256,6 +2256,17 @@ impl Ed {
 
     fun handle_key(self, k: Key) {
         let name = key_name(k)
+        // The terminal sends Alt+x as Esc then x. An Alt+letter nobody bound
+        // is most likely a quick Esc and a key (leaving insert mode and
+        // moving on), so it runs as those two keys.
+        if name.starts_with("alt+") and len(name.chars()) == 5 {
+            let mode = "insert" if self.mode == "insert" else (self.mode if self.mode == "visual" else "normal")
+            if self.lookup(mode, name) == "" {
+                self.handle_key(Key.Esc)
+                self.handle_key(Key.Char(name.substring(4, name.length())))
+                return
+            }
+        }
         if (name == "f6" or name == "shift+f6") and len(self.plug.panels) > 0 and self.can_focus_panels() {
             self.cycle_focus(1 if name == "f6" else 0 - 1)
             return
