@@ -97,6 +97,8 @@ class Ed {
     history: list[str] = []
     hist_at: int = 0
     picker_kind: str = ""
+    // Set when the picker's choice was taken, so closing it does not undo it.
+    picker_took: bool = false
     picker_items: list[str] = []
     picker_shown: list[str] = []
     picker_sel: int = 0
@@ -203,6 +205,8 @@ class Plugins {
     // bumps on every change so cached row kinds are recomputed.
     bases: dict[str, list[str]] = {}
     bases_gen: int = 0
+    // The theme before the theme picker opened, restored when it is dismissed.
+    theme_before: str = ""
     // Where :plugin install puts plugins; "" means ~/.config/dusk/plugins.
     install_root: str = ""
     jobs: list[Job] = []
@@ -1314,6 +1318,10 @@ impl Ed {
         self.picker_top = 0
         self.mode = "picker"
         self.filter_picker()
+        if kind == "themes" {
+            self.plug.theme_before = self.theme.name
+            self.picker_sel = max(0, self.picker_shown.index_of(self.theme.name).unwrap_or(0))
+        }
     }
 
     fun filter_picker(self) {
@@ -1331,6 +1339,7 @@ impl Ed {
         let item = self.picker_shown[self.picker_sel]
         let kind = self.picker_kind
         self.mode = "normal"
+        self.picker_took = true
         if kind == "files" {
             self.push_jump()
             self.open(item)
@@ -1379,11 +1388,26 @@ impl Ed {
             self.fail("no theme ${name}; :theme lists them")
             return
         }
+        self.apply_theme(name)
+        self.say("theme: ${self.theme.name}")
+    }
+
+    fun apply_theme(self, name: str) {
         self.theme = make_theme(name)
         for (k, v) in self.cfg.colors {
             let _ = self.theme.set(k, v)
         }
-        self.say("theme: ${self.theme.name}")
+    }
+
+    // While the theme picker is open, show the selected theme at once.
+    fun preview_theme(self) {
+        if self.mode != "picker" or self.picker_kind != "themes" or len(self.picker_shown) == 0 {
+            return
+        }
+        let name = self.picker_shown[self.picker_sel]
+        if name != self.theme.name and has_theme(name) {
+            self.apply_theme(name)
+        }
     }
 
     // theme/list's result: every theme with its description, and the current one.
@@ -2989,6 +3013,19 @@ impl Ed {
     }
 
     fun picker_key(self, k: Key, name: str) {
+        self.picker_key_inner(k, name)
+        if self.picker_kind == "themes" {
+            if self.mode == "picker" {
+                self.preview_theme()
+            } else if self.mode == "normal" and self.theme.name != self.plug.theme_before and not self.picker_took {
+                // Dismissed: put the theme from before the picker back.
+                self.apply_theme(self.plug.theme_before)
+            }
+        }
+        self.picker_took = false
+    }
+
+    fun picker_key_inner(self, k: Key, name: str) {
         match k {
             case Esc {
                 self.mode = "normal"
@@ -3148,6 +3185,7 @@ impl Ed {
                     self.scroll_side(6)
                 } else if self.mode == "picker" {
                     self.picker_sel = min(len(self.picker_shown) - 1, self.picker_sel + 3)
+                    self.preview_theme()
                 } else if self.mode == "help" {
                     self.help_top += 3
                 } else if in_side {
@@ -3165,6 +3203,7 @@ impl Ed {
                     self.scroll_side(0 - 6)
                 } else if self.mode == "picker" {
                     self.picker_sel = max(0, self.picker_sel - 3)
+                    self.preview_theme()
                 } else if self.mode == "help" {
                     self.help_top = max(0, self.help_top - 3)
                 } else if in_side {
@@ -3190,6 +3229,7 @@ impl Ed {
                             self.picker_accept()
                         } else {
                             self.picker_sel = i
+                            self.preview_theme()
                         }
                     }
                     return

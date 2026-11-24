@@ -114,3 +114,25 @@ fun test_click_lands_after_wide_characters() {
     let (r2, c2) = ed.cell_to_pos(3, 1)
     assert_eq_int(c2, 1)
 }
+
+fun test_theme_picker_previews_and_restores() {
+    let ed = run_keys("x", "")
+    ed.run("pick_theme", 1)
+    assert_eq_str(ed.theme.name, "dusk")
+    let second = ed.picker_shown[1]
+    for ev in parse_script("<down>") {
+        ed.handle_key(ev.key)
+    }
+    assert_eq_str(ed.theme.name, second)
+    for ev in parse_script("<esc>") {
+        ed.handle_key(ev.key)
+    }
+    assert_eq_str(ed.theme.name, "dusk")
+    ed.run("pick_theme", 1)
+    let third = ed.picker_shown[2]
+    for ev in parse_script("<down><down><cr>") {
+        ed.handle_key(ev.key)
+    }
+    assert_eq_str(ed.theme.name, third)
+    assert_eq_str(ed.mode, "normal")
+}
