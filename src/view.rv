@@ -795,6 +795,7 @@ fun help_lines(ed: Ed) -> list[str] {
         "  drag             select text; drag in the line numbers to select lines",
         "  double-click     select a word",
         "  wheel            scroll the file, the file tree, or a list",
+        "  shift+wheel      scroll long lines sideways (a sideways wheel too)",
         "  middle-click     paste",
         "",
         "OPERATORS (normal mode)",
@@ -823,9 +824,15 @@ fun help_lines(ed: Ed) -> list[str] {
         ":s/old/new/g  replace in the line   :%s/old/new/g  everywhere   :'<,'>s  in the selection",
         ":sort   :theme [name]   :lang [name]   :set nu|rnu|nonu|ts=2|expandtab|noautopairs",
         ":grep text  search the whole project   :config  edit the config   :plugins  run a plugin   :!cmd  run a shell command",
+        ":diff  outside changes as a diff   :clear_changes  drop their highlights   (] c / [ c jump, g r reverts one)",
     ] {
         out.push("  " + line)
     }
+    out.push("")
+    out.push("THEMES")
+    out.push("  :theme previews each theme as you move; Enter keeps it, Esc goes back. Theme files in")
+    out.push("  ~/.config/dusk/themes set colors, bold and italic, glyphs, and mode names. For twenty more:")
+    out.push("  :plugin install github.com/martian56/dusk-theme")
     out.push("")
     out.push("PLUGINS AND CONFIG")
     out.push("  F12 or :config opens ~/.config/dusk/config.toml with every option documented.")
